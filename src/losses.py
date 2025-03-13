@@ -16,7 +16,7 @@ def compute_distance_map(mask_np):
     distance_map = distance_transform_edt(1 - mask_np)
     return distance_map
 
-def boundary_aware_loss(pred_logits, target_mask, alpha=1.0, cap_value=0.5):
+def boundary_aware_loss(pred_logits, target_mask, alpha=1.0, cap_value=0.5, use_bce=False):
     """
     Compute a boundary-aware loss by weighting the per-pixel CrossEntropy loss 
     with a distance map computed from the ground truth mask.
@@ -29,7 +29,10 @@ def boundary_aware_loss(pred_logits, target_mask, alpha=1.0, cap_value=0.5):
         torch.Tensor: Scalar loss.
     """
     # Standard per-pixel CrossEntropy loss (no reduction)
-    ce_loss = F.cross_entropy(pred_logits, target_mask, reduction='none')
+    if use_bce:
+        ce_loss = F.binary_cross_entropy_with_logits(pred_logits[:, 1, :, :], target_mask, reduction='none')        
+    else:
+        ce_loss = F.cross_entropy(pred_logits, target_mask, reduction='none')
     
     # For each sample in the batch, compute a distance map
     B, H, W = target_mask.shape
@@ -69,10 +72,13 @@ def total_variation_loss(x):
         return h_diff + w_diff
 
 # A simple focal loss implementation, deal with class imbalances due to pixels being biased towards background class
-def focal_loss(logits, targets, alpha=0.8, gamma=2.0):
+def focal_loss(logits, targets, alpha=0.8, gamma=2.0, use_bce=False):
     # logits: (B, num_classes, H, W)
     # targets: (B, H, W)
-    ce_loss = nn.functional.cross_entropy(logits, targets, reduction='none')
+    if use_bce:
+        ce_loss = nn.functional.binary_cross_entropy_with_logits(logits[:, 1, :, :], targets, reduction='none')
+    else:
+        ce_loss = nn.functional.cross_entropy(logits, targets, reduction='none')
     pt = torch.exp(-ce_loss)  # probability of correct classification
     focal_loss = alpha * (1 - pt) ** gamma * ce_loss
     return focal_loss.mean()
@@ -83,3 +89,29 @@ def dice_loss(pred, target, smooth=1.0):
     intersection = (pred * target).sum(dim=(2,3))
     dice = (2. * intersection + smooth) / (pred.sum(dim=(2,3)) + target.sum(dim=(2,3)) + smooth)
     return 1 - dice.mean()
+
+def iou_loss(pred, target, eps=1e-6):
+    """
+    Compute the Jaccard index (IoU) loss for binary segmentation.
+    
+    Args:
+        pred (torch.Tensor): Predicted probabilities of shape (B, H, W) or (B, 1, H, W).
+        target (torch.Tensor): Ground truth binary mask of shape (B, H, W) or (B, 1, H, W).
+        eps (float): Small value to avoid division by zero.
+        
+    Returns:
+        torch.Tensor: Scalar loss value.
+    """
+    # Ensure both pred and target are of shape (B, H, W)
+    if pred.dim() == 4 and pred.size(1) == 1:
+        pred = pred.squeeze(1)
+    if target.dim() == 4 and target.size(1) == 1:
+        target = target.squeeze(1)
+    
+    # Calculate intersection and union
+    intersection = (pred * target).sum(dim=(1, 2))
+    union = pred.sum(dim=(1, 2)) + target.sum(dim=(1, 2)) - intersection
+    
+    jaccard = (intersection + eps) / (union + eps)
+    loss = 1 - jaccard  # Loss is 1 - Jaccard index
+    return loss.mean()

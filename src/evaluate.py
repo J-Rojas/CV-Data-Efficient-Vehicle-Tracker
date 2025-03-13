@@ -7,7 +7,7 @@ from torch.utils.data import DataLoader
 from torchmetrics import JaccardIndex
 from .loader import val_loader  # your data module from previous code
 from .detector import SegmentationLightning  # your LightningModule
-from .tools import get_bounding_box_from_mask, torch_to_cv2_image
+from .tools import get_bounding_box_from_mask, torch_to_cv2_image, overlay_mask_on_image
 
 
 def evaluate_model(checkpoint_path):
@@ -32,7 +32,8 @@ def evaluate_model(checkpoint_path):
         for batch in val_loader:
 
             pixel_values = batch["pixel_values"].to(model.device)  # (B, 3, H, W)
-            labels = batch["labels"].to(model.device).long()              # (B, H, W) expected
+            labels = batch["labels"].to(model.device)
+            labels_long = labels.long()
 
             if video_out is None:
                 layers, height, width = pixel_values.shape[1:]
@@ -44,23 +45,26 @@ def evaluate_model(checkpoint_path):
             # Ensure labels are in the correct shape (B, H, W)
             if labels.dim() == 4 and labels.shape[1] == 1:
                 labels = labels.squeeze(1)
+                labels_long = labels_long.squeeze(1)
             
-            logits = model(pixel_values)  # (B, num_classes, H, W)
+            logits = model(**{"pixel_values": pixel_values})
+            
             loss = criterion(logits, labels)
             total_loss += loss.item()
             total_batches += 1
             
             # For IoU, get predicted class for each pixel
             preds = torch.argmax(logits, dim=1)  # (B, H, W)
-            iou_metric.update(preds, labels)
+            iou_metric.update(preds, labels_long)
 
-            print((preds != 0).sum())
+            #print((preds != 0).sum())
+            #print((labels > 0).sum())
 
             for i in range(pixel_values.shape[0]):
-                bbox = get_bounding_box_from_mask(preds[i].squeeze().detach().numpy())
-                print(bbox)
-
-                im = torch_to_cv2_image(pixel_values[i].detach())
+                bbox = get_bounding_box_from_mask(preds[i].squeeze().detach().cpu().numpy())
+                im = torch_to_cv2_image(pixel_values[i].detach())                
+                im = overlay_mask_on_image(im, labels[i].detach().cpu().numpy(), color=(255, 0, 255), alpha=1.0)
+                
                 if bbox:
                     x1, y1, x2, y2 = bbox
                     cv2.rectangle(im, (x1, y1), (x2, y2), color=(0, 0, 255), thickness=2)

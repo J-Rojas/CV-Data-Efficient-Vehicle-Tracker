@@ -1,100 +1,68 @@
 import os
 import torch
 import torch.nn as nn
-from transformers import AutoFeatureExtractor, AutoModel
+from transformers import AutoFeatureExtractor, AutoModel, SegformerForSemanticSegmentation, SegformerFeatureExtractor
 import pytorch_lightning as pl
 from pytorch_lightning import Trainer
 from pytorch_lightning.callbacks import ModelCheckpoint
-from .losses import dice_loss, total_variation_loss, boundary_aware_loss, focal_loss
+from .losses import dice_loss, total_variation_loss, boundary_aware_loss, focal_loss, iou_loss
 
-class SegmentationHead(nn.Module):
-    def __init__(self, in_channels, num_classes, dropout_prob=0.1):
-        super().__init__()
-        # A simple segmentation head: a convolution, non-linearity, and a final conv layer
-        self.conv1 = nn.Conv2d(in_channels, 256, kernel_size=3, padding=1)
-        self.bn1 = nn.BatchNorm2d(256)
-        self.relu = nn.ReLU()
-        # A simple segmentation head: a convolution, non-linearity, and a final conv layer
-        self.conv2 = nn.Conv2d(256, 256, kernel_size=3, padding=1)
-        self.bn2 = nn.BatchNorm2d(256)        
-        # Dropout for regularization
-        self.dropout = nn.Dropout2d(dropout_prob)
-        self.conv3 = nn.Conv2d(256, num_classes, kernel_size=1)
-    
-    def forward(self, x, output_size):
-        x = self.conv1(x)
-        x = self.bn1(x)
-        x = self.relu(x)
-        x = self.conv2(x)        
-        x = self.bn2(x)
-        x = self.relu(x)
-        x = self.dropout(x)
-        x = self.conv3(x)
-        # Upsample to match the output_size (e.g., original image resolution)
-        x = nn.functional.interpolate(x, size=output_size, mode='bilinear', align_corners=False)
-        return x
-
-class SegmentationModel(nn.Module):
-    def __init__(self, backbone_model_name, num_classes, patch_resolution=(14, 14)):
-        super().__init__()
-        # Load the pretrained Swin model from HuggingFace
-        self.backbone = AutoModel.from_pretrained(backbone_model_name)
-        # Assume the backbone configuration contains the hidden size
-        hidden_dim = self.backbone.config.hidden_size
-        # Assume a patch resolution of 7x7 for a 224x224 image.
-        # This might be different depending on the model.
-        self.patch_resolution = patch_resolution
-        self.seg_head = SegmentationHead(in_channels=hidden_dim, num_classes=num_classes)
-
-        # freeze the pre-trained backbone
-        for param in self.backbone.parameters():
-            param.requires_grad = False
-    
-    def forward(self, pixel_values):
-        # pixel_values: (batch, 3, height, width)
-        outputs = self.backbone(pixel_values)
-        # outputs.last_hidden_state has shape (batch, num_patches, hidden_dim)
-        hidden_states = outputs.last_hidden_state
-        batch_size = hidden_states.shape[0]
-        H, W = self.patch_resolution
-        # Reshape hidden_states to (batch, hidden_dim, H, W)
-        tokens_without_cls = hidden_states[:, 1:, :]
-        feature_map = tokens_without_cls.transpose(1, 2).reshape(batch_size, -1, H, W)
-        # Use the segmentation head to produce per-pixel predictions at the original resolution
-        seg_logits = self.seg_head(feature_map, output_size=pixel_values.shape[2:])
-        return seg_logits
+def init_weights(m):
+    if isinstance(m, nn.Conv2d):
+        nn.init.kaiming_normal_(m.weight, mode="fan_out", nonlinearity="relu")
+        if m.bias is not None:
+            nn.init.constant_(m.bias, 0)
 
 
 class SegmentationLightning(pl.LightningModule):
     def __init__(self, backbone_name="google/vit-base-patch16-224", num_classes=2, lr=1e-4):
         super().__init__()
         self.save_hyperparameters()
-        self.model = SegmentationModel(backbone_model_name=backbone_name, num_classes=num_classes)
+        # Load the feature extractor and model
+        model_name = "nvidia/segformer-b0-finetuned-cityscapes-512-1024"
+        self.model = SegformerForSemanticSegmentation.from_pretrained(model_name)
+        self.model.config.num_labels = num_classes
+        in_channels = self.model.decode_head.classifier.in_channels
+        self.model.decode_head.classifier = nn.Conv2d(in_channels, num_classes, kernel_size=1)
+        self.model.decode_head.classifier.apply(init_weights)
+        #self.model = SegmentationModel(backbone_model_name=backbone_name, num_classes=num_classes)
         # Use per-pixel CrossEntropyLoss (expects logits of shape [B, C, H, W] and labels of shape [B, H, W])
-        self.criterion = nn.CrossEntropyLoss()
+        #self.criterion = nn.CrossEntropyLoss()
         self.lr = lr        
 
-    def forward(self, pixel_values):
-        return self.model(pixel_values)
+        for param in self.model.parameters():
+            param.requires_grad = False
+        for param in self.model.decode_head.parameters():
+            param.requires_grad = True
 
-    def combined_loss(self, logits, targets, alpha=0.3):
-        targets_long = targets.long()
-        ce = nn.functional.cross_entropy(logits, targets_long)
+    def forward(self, pixel_values):
+        outputs = self.model(pixel_values)
+        logits = outputs.logits  # Shape: (batch_size, num_labels, H, W)
+
+        # Upsample logits to the original image size
+        # The feature extractor's size may differ from the original image size.
+        logits = torch.nn.functional.interpolate(
+            logits,
+            size=pixel_values.shape[2:],
+            mode="bilinear",
+            align_corners=False
+        )
+        return logits
+    
+    def combined_loss(self, logits, targets, alpha=0.3):        
+        #ce = nn.functional.cross_entropy(logits, targets_long)
         target_two_channel = torch.stack([1 - targets, targets], dim=1)
         # Convert targets to one-hot for dice loss; assume num_classes=2
         pred_probs = torch.softmax(logits, dim=1)
         # focal loss is based on the cross entropy
-        floss = focal_loss(logits, targets_long)
+        floss = focal_loss(logits, targets, use_bce=True) # use bce when using soft-targets
         dice = dice_loss(pred_probs, target_two_channel)
         # Compute boundary-aware loss, this already uses the CE loss
-        b_loss = 0.0 #boundary_aware_loss(logits, targets_long)
+        b_loss = 0.0 #boundary_aware_loss(logits, targets, use_bce=True)
         return alpha * (floss + b_loss) + (1 - alpha) * dice
 
-    def training_step(self, batch, batch_idx):
-        pixel_values = batch["pixel_values"]      # (B, 3, H, W)
-        labels = batch["labels"].squeeze() # (B, H, W) with class indices
-        logits = self(pixel_values)               # (B, num_classes, H, W)
-        seg_loss = self.combined_loss(logits, labels)
+    def criterion(self, logits, targets):
+        seg_loss = self.combined_loss(logits, targets)
 
         # Compute TV loss on the predicted probabilities (or on logits)
         # Here, we apply softmax to obtain probability maps
@@ -103,19 +71,37 @@ class SegmentationLightning(pl.LightningModule):
         pred_positive = prob_maps[:, 1, :, :]   # shape: (B, H, W)
 
         # Compute MSE loss between the predicted vehicle probability and fuzzy label
-        mse_loss = nn.functional.mse_loss(pred_positive, labels)
+        mse_loss = nn.functional.mse_loss(pred_positive, targets)
 
         tv_loss = total_variation_loss(prob_maps)
         
         # Define a hyperparameter to weight the TV loss
         lambda_tv = 0.1
-        lambda_mse = 0.5
+        lambda_mse = 0.7
         total_loss = lambda_mse * mse_loss + (1 - lambda_mse) * seg_loss + lambda_tv * tv_loss
 
-        self.log("train_seg_loss", seg_loss, on_step=True, on_epoch=True, prog_bar=True)
-        self.log("train_tv_loss", tv_loss, on_step=True, on_epoch=True, prog_bar=True)
-        self.log("train_total_loss", total_loss, on_step=True, on_epoch=True, prog_bar=True)
+        return total_loss
+
+    def criterion_mse(self, logits, targets):
+        prob_maps = torch.softmax(logits, dim=1)
+        pred_positive = prob_maps[:, 1, :, :]   # shape: (B, H, W)
+        mse_loss = nn.functional.mse_loss(pred_positive, targets)
+        prob_maps = torch.softmax(logits, dim=1)
+        pred_positive = prob_maps[:, 1, :, :]   # shape: (B, H, W)
+
+        return mse_loss # + iou_loss(pred_positive, targets)
+
+
+    def training_step(self, batch, batch_idx):
+        pixel_values = batch["pixel_values"]      # (B, 3, H, W)
         
+        # Forward pass: get the logits
+        logits = self.forward(**{"pixel_values": pixel_values})
+        
+        labels = batch["labels"].squeeze() # (B, H, W) with class indices
+        
+        total_loss = self.criterion(logits, labels)
+
         self.log("train_loss", total_loss, on_step=True, on_epoch=True, prog_bar=True)
         return total_loss
 
@@ -128,7 +114,7 @@ class SegmentationLightning(pl.LightningModule):
         return loss
 
     def configure_optimizers(self):
-        optimizer = torch.optim.Adam(filter(lambda p: p.requires_grad, self.parameters()), lr=self.lr)
+        optimizer = torch.optim.AdamW(self.parameters(), lr=self.lr)
         return optimizer
         
     def train_dataloader(self):
@@ -143,6 +129,9 @@ if __name__ == '__main__':
     num_classes = 2  # For example, background vs. vehicle
     model = SegmentationLightning()
 
+    if os.path.exists("./checkpoints/last.ckpt"):
+        os.remove("./checkpoints/last.ckpt")
+
     # checkpoint saver
     checkpoint_callback = ModelCheckpoint(
         monitor="train_loss",          # metric to monitor
@@ -153,5 +142,5 @@ if __name__ == '__main__':
         dirpath="checkpoints/"
     )
 
-    trainer = Trainer(max_epochs=5, callbacks=[checkpoint_callback])
+    trainer = Trainer(max_epochs=10, callbacks=[checkpoint_callback])
     trainer.fit(model)

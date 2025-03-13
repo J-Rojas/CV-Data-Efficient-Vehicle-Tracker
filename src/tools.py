@@ -26,17 +26,16 @@ def get_bounding_box_from_mask(mask) -> tuple | None:
     x, y, w, h = cv2.boundingRect(largest_contour)
     return x, y, x + w, y + h
 
-def create_fuzzy_label_rect(image_shape, bbox, factor=0.1):
+def create_label_rect(image_shape, bbox):
     """
-    Create a fuzzy label for a rectangular region defined by a bounding box.
+    Create a label for a rectangular region defined by a bounding box.
     
     Args:
         image_shape (tuple): Shape of the full image mask (height, width).
         bbox (tuple): Bounding box in the form (x1, y1, x2, y2).
-        factor (float): Factor to scale the kernel size and sigma relative to the bbox dimensions.
-    
+            
     Returns:
-        numpy.ndarray: A fuzzy mask with values between 0 and 1, where only the bbox region is blurred.
+        numpy.ndarray: A mask with values between 0 and 255, where only the bbox region is blurred.
     """
     height, width = image_shape
     x1, y1, x2, y2 = bbox
@@ -44,37 +43,97 @@ def create_fuzzy_label_rect(image_shape, bbox, factor=0.1):
     # Create a blank binary mask of the full image
     binary_mask = np.zeros((height, width), dtype=np.uint8)
     # Fill the rectangle
-    cv2.rectangle(binary_mask, (x1, y1), (x2, y2), 255)
+    cv2.rectangle(binary_mask, (x1, y1), (x2, y2), 1)
     
-    # Crop the rectangular region from the binary mask
-    crop = binary_mask[y1:y2, x1:x2].astype(np.float32)
+    return binary_mask.astype(np.float32)
+
+def create_fuzzy_label_rect(image_shape, bbox, factor=0.1, sigma_factor=0.3):
+    """
+    Create a fuzzy elliptical mask using an analytic 2D Gaussian function.
+    The Gaussian is computed over the bbox such that the peak is at the center,
+    and the values decay outward.
+
+    Args:
+        image_shape (tuple): Shape of the full image mask (height, width).
+        bbox (tuple): Bounding box in the form (x1, y1, x2, y2).
+        sigma_factor (float): Fraction of the bbox dimensions to use as sigma.
+
+    Returns:
+        numpy.ndarray: A fuzzy mask with values in [0, 1] where the Gaussian 
+                       is computed within the bbox and zeros elsewhere.
+    """
+    height, width = image_shape
+    x1, y1, x2, y2 = bbox
+    bbox_width = x2 - x1
+    bbox_height = y2 - y1
+
+    # Coordinates for the bbox region
+    xs = np.arange(bbox_width)
+    ys = np.arange(bbox_height)
+    xv, yv = np.meshgrid(xs, ys)
+
+    # Center of the bbox (in local coordinates)
+    center_x = bbox_width / 2.0
+    center_y = bbox_height / 2.0
+
+    # Standard deviations in x and y (controls the spread of the Gaussian)
+    sigma_x = bbox_width * sigma_factor
+    sigma_y = bbox_height * sigma_factor
+
+    # Compute the 2D Gaussian function:
+    # G(x,y) = exp( -[(x - center_x)^2 / (2*sigma_x^2) + (y - center_y)^2 / (2*sigma_y^2)] )
+    gaussian = np.exp(-(((xv - center_x) ** 2) / (2 * sigma_x ** 2) +
+                        ((yv - center_y) ** 2) / (2 * sigma_y ** 2)))
+    gaussian = gaussian.astype(np.float32)
     
-    # Compute kernel sizes based on the dimensions of the bbox
-    bbox_height = crop.shape[0]
-    bbox_width = crop.shape[1]
+    # Optionally, you can normalize the gaussian to ensure the peak is 1:
+    gaussian /= gaussian.max() + 1e-6
+
+    # Create a full image mask and place the gaussian in the bbox region
+    full_mask = np.zeros((height, width), dtype=np.float32)
+    full_mask[y1:y2, x1:x2] = gaussian
+
+    return full_mask
+
+def overlay_mask_on_image(image, mask, color=(0, 255, 0), alpha=0.5):
+    """
+    Overlay a mask on an image, where the mask values are in the range [0, 1].
+    The overlay is computed per pixel by multiplying the mask by alpha.
     
-    kernel_height = max(3, int(bbox_height * factor))
-    kernel_width = max(3, int(bbox_width * factor))
-    # Ensure kernel sizes are odd
-    if kernel_height % 2 == 0:
-        kernel_height += 1
-    if kernel_width % 2 == 0:
-        kernel_width += 1
+    Args:
+        image (numpy.ndarray): Input image in BGR format.
+        mask (numpy.ndarray): Mask with values in [0, 1] (or in [0,255], which will be normalized).
+        color (tuple): BGR color for the overlay.
+        alpha (float): Maximum transparency factor for the overlay.
         
-    # Compute sigma values proportionally
-    sigma_y = bbox_height * factor
-    sigma_x = bbox_width * factor
+    Returns:
+        numpy.ndarray: Image with the overlay.
+    """
+    # Convert mask to float32 in the range [0,1]
+    if mask.dtype == np.uint8:
+        # If the mask is [0,255], convert it to [0,1]
+        if mask.max() > 1:
+            mask = mask.astype(np.float32) / 255.0
+        else:
+            mask = mask.astype(np.float32)
+    else:
+        mask = mask.astype(np.float32)
     
-    # Apply Gaussian blur to the cropped region
-    blurred_crop = cv2.GaussianBlur(crop, (kernel_width, kernel_height), sigmaX=sigma_x, sigmaY=sigma_y)
-    # Normalize the blurred crop to the range [0, 1]
-    blurred_crop = blurred_crop / (blurred_crop.max() + 1e-6)
+    # Create a colored overlay image
+    colored_overlay = np.full(image.shape, color, dtype=np.float32)
     
-    # Create an output mask and place the blurred crop back into its original location
-    fuzzy_mask = np.zeros((height, width), dtype=np.float32)
-    fuzzy_mask[y1:y2, x1:x2] = blurred_crop
+    # Convert the original image to float32
+    image_float = image.astype(np.float32)
     
-    return fuzzy_mask
+    # The overlay factor is (alpha * mask) which varies per pixel.
+    # For each pixel, the final color is:
+    #   blended = image * (1 - alpha*mask) + colored_overlay * (alpha*mask)
+    # mask[..., np.newaxis] expands the mask to have the same number of channels as the image.
+    blended = image_float * (1 - alpha * mask[..., np.newaxis]) + colored_overlay * (alpha * mask[..., np.newaxis])
+    
+    # Clip the output to [0,255] and convert back to uint8
+    output = np.clip(blended, 0, 255).astype(np.uint8)
+    return output
 
 def torch_to_cv2_image(tensor, denormalize=True):
     """
