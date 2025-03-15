@@ -5,8 +5,8 @@ import pytorch_lightning as pl
 import cv2
 from torch.utils.data import DataLoader
 from torchmetrics import JaccardIndex
-from .loader import val_loader  # your data module from previous code
-from .detector import SegmentationLightning  # your LightningModule
+from .loader import eval_loader, eval_dataset
+from .detector import SegmentationLightning  
 from .tools import get_bounding_box_from_mask, torch_to_cv2_image, overlay_mask_on_image
 
 
@@ -28,8 +28,10 @@ def evaluate_model(checkpoint_path):
     criterion = model.criterion
 
     video_out = None
+    idx = 0
+    
     with torch.no_grad():
-        for batch in val_loader:
+        for batch in eval_loader:
 
             pixel_values = batch["pixel_values"].to(model.device)  # (B, 3, H, W)
             labels = batch["labels"].to(model.device)
@@ -50,26 +52,31 @@ def evaluate_model(checkpoint_path):
             logits = model(**{"pixel_values": pixel_values})
             
             loss = criterion(logits, labels)
-            total_loss += loss.item()
             total_batches += 1
             
             # For IoU, get predicted class for each pixel
             preds = torch.argmax(logits, dim=1)  # (B, H, W)
-            iou_metric.update(preds, labels_long)
 
+            if idx not in eval_dataset.ignored_frames:
+                total_loss += loss.item()
+                
             #print((preds != 0).sum())
             #print((labels > 0).sum())
-
+            
             for i in range(pixel_values.shape[0]):
                 bbox = get_bounding_box_from_mask(preds[i].squeeze().detach().cpu().numpy())
-                im = torch_to_cv2_image(pixel_values[i].detach())                
-                im = overlay_mask_on_image(im, labels[i].detach().cpu().numpy(), color=(255, 0, 255), alpha=1.0)
+                im = torch_to_cv2_image(pixel_values[i].detach())  
+                if idx not in eval_dataset.ignored_frames:              
+                    im = overlay_mask_on_image(im, labels[i].detach().cpu().numpy(), color=(255, 0, 255), alpha=1.0)
+                    iou_metric.update(preds[i], labels_long[i])
                 
                 if bbox:
                     x1, y1, x2, y2 = bbox
                     cv2.rectangle(im, (x1, y1), (x2, y2), color=(0, 0, 255), thickness=2)
 
                 video_out.write(im)
+
+                idx += 1
 
     mean_loss = total_loss / total_batches
     mean_iou = iou_metric.compute().item()

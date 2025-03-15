@@ -1,5 +1,6 @@
 import cv2
 import numpy as np
+import math
 
 def get_bounding_box_from_mask(mask) -> tuple | None:
     """
@@ -166,3 +167,126 @@ def torch_to_cv2_image(tensor, denormalize=True):
     img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
     
     return img
+
+def extract_masked_pixels(im, mask):
+    return cv2.bitwise_and(im, im, mask=mask)
+
+def inpaint_pixels_with_mask(im, mask, radius=5):
+    return cv2.inpaint(im, mask, radius, cv2.INPAINT_NS)
+
+
+def tile_to_size(matrix, target_shape):
+    """
+    Tiles the input matrix until the resulting matrix is at least as large as the target shape,
+    and then crops it to exactly the target shape.
+    
+    Args:
+        matrix (np.ndarray): The input array (2D or 3D).
+        target_shape (tuple): The desired shape, e.g. (M, N) for a 2D array or (M, N, C) for a 3D array.
+        
+    Returns:
+        np.ndarray: The tiled (and cropped) array of shape target_shape.
+    """
+    # Get current shape (assuming at least 2 dimensions)
+    m, n = matrix.shape[:2]
+    target_m, target_n = target_shape[:2]
+    
+    # Compute number of repetitions needed along each dimension
+    rep_m = math.ceil(target_m / m)
+    rep_n = math.ceil(target_n / n)
+    
+    # Tile the matrix. If matrix has more than 2 dimensions, tile only along the first two.
+    if matrix.ndim == 2:
+        tiled = np.tile(matrix, (rep_m, rep_n))
+    else:
+        # For a 3D array, tile along height and width only
+        tiled = np.tile(matrix, (rep_m, rep_n, 1))
+    
+    # Crop the tiled array to the target size
+    if matrix.ndim == 2:
+        return tiled[:target_m, :target_n]
+    else:
+        return tiled[:target_m, :target_n, :]
+
+def extend_image_with_edge(image, target_shape, side="end"):
+    """
+    Extend a 3D image (height, width, channels) to the target shape by
+    filling extra space with the edge values from either the start or end.
+    
+    Args:
+        image (np.ndarray): Input image with shape (H, W, C).
+        target_shape (tuple): Desired shape (target_H, target_W, target_C).
+                              target_C must equal the number of channels in the image.
+        side (str): "end" pads at the bottom/right; "start" pads at the top/left.
+        
+    Returns:
+        np.ndarray: Extended image with shape target_shape.
+    """
+    H, W, C = image.shape
+    target_H, target_W, target_C = target_shape
+    if target_C != C:
+        raise ValueError("The target channel count must match the input image channels.")
+    
+    pad_H = max(0, target_H - H)
+    pad_W = max(0, target_W - W)
+    
+    if side == "end":
+        pad_top, pad_bottom = 0, pad_H
+        pad_left, pad_right = 0, pad_W
+    elif side == "start":
+        pad_top, pad_bottom = pad_H, 0
+        pad_left, pad_right = pad_W, 0
+    else:
+        raise ValueError("side must be either 'start' or 'end'")
+    
+    # Pad only the first two dimensions (height and width); no padding for channels.
+    extended_image = np.pad(image, ((pad_top, pad_bottom), (pad_left, pad_right), (0, 0)), mode="edge")
+    return extended_image
+
+def crop_to_nonzero(image):
+    """
+    Crops the input image to the smallest rectangle that contains all non-zero pixels.
+    
+    Args:
+        image (numpy.ndarray): Input image (grayscale or color).
+    
+    Returns:
+        numpy.ndarray: Cropped image.
+    """
+    # If the image is color, convert to grayscale for the purpose of finding non-zero areas.
+    if image.ndim == 3 and image.shape[2] == 3:
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    else:
+        gray = image
+
+    # Find coordinates of non-zero pixels.
+    nonzero = cv2.findNonZero(gray)
+    if nonzero is None:
+        # If no non-zero pixels found, return the original image.
+        return image
+
+    # Get the bounding rectangle for these non-zero pixels.
+    x, y, w, h = cv2.boundingRect(nonzero)
+
+    # Crop the image to the bounding rectangle.
+    cropped = image[y:y+h, x:x+w]
+    return cropped
+
+def save_with_transparency(image, output_path):
+    """
+    Converts a 3-channel BGR image to a 4-channel BGRA image where
+    pixels that are completely zero are set to transparent and then saves the image as PNG.
+
+    Args:
+        image (np.ndarray): Input image in BGR format (H, W, 3) with dtype uint8.
+        output_path (str): Path to save the PNG image.
+    """
+    # Create an alpha channel:
+    # Where all three channels are 0, set alpha to 0 (transparent), otherwise 255 (opaque)
+    alpha = np.where(np.all(image == 0, axis=2), 0, 255).astype(np.uint8)
+    
+    # Stack the alpha channel to create a BGRA image
+    bgra = np.dstack((image, alpha))
+    
+    # Save the image as PNG
+    cv2.imwrite(output_path, bgra)
