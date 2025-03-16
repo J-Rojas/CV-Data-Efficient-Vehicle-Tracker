@@ -1,7 +1,7 @@
 import os
 import torch
 import torch.nn as nn
-from transformers import AutoFeatureExtractor, AutoModel, SegformerForSemanticSegmentation, SegformerFeatureExtractor
+from transformers import AutoFeatureExtractor, AutoModel, SegformerForSemanticSegmentation, SegformerFeatureExtractor, SegformerConfig
 import pytorch_lightning as pl
 from pytorch_lightning import Trainer
 from pytorch_lightning.callbacks import ModelCheckpoint
@@ -20,10 +20,8 @@ class SegmentationLightning(pl.LightningModule):
         self.save_hyperparameters()
         # Load the feature extractor and model
         model_name = "nvidia/segformer-b0-finetuned-cityscapes-512-1024"
-        self.model = SegformerForSemanticSegmentation.from_pretrained(model_name)
-        self.model.config.num_labels = num_classes
-        in_channels = self.model.decode_head.classifier.in_channels
-        self.model.decode_head.classifier = nn.Conv2d(in_channels, num_classes, kernel_size=1)
+        config = SegformerConfig(num_labels = num_classes, classifier_dropout_prob=0.1)
+        self.model = SegformerForSemanticSegmentation.from_pretrained(model_name, config=config, ignore_mismatched_sizes=True)
         self.model.decode_head.classifier.apply(init_weights)
         #self.model = SegmentationModel(backbone_model_name=backbone_name, num_classes=num_classes)
         # Use per-pixel CrossEntropyLoss (expects logits of shape [B, C, H, W] and labels of shape [B, H, W])
@@ -93,6 +91,8 @@ class SegmentationLightning(pl.LightningModule):
 
 
     def training_step(self, batch, batch_idx):
+        self.model.decode_head.train(True)
+
         pixel_values = batch["pixel_values"]      # (B, 3, H, W)
         
         # Forward pass: get the logits
