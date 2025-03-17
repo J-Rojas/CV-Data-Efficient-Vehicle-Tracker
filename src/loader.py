@@ -45,22 +45,43 @@ class VehicleSegmentationDataset(Dataset):
         return len(self.image_paths)
     
     def __getitem__(self, idx):
-        # Read the CSV row corresponding to this sample
-        #row = self.labels_df.iloc[idx]
-        filename = self.image_paths[idx]
-        filename_label = self.labels_paths[idx]
-        #bbox = (int(row[2]), int(row[3]), int(row[6]), int(row[7]))
+        
+        # Merge the previous and current frames into one image vertically for input into the network
 
-        # Load the image
-        image_path = filename
-        image = Image.open(image_path).convert("RGB")
+        images = []
+        labels = []
+        for i in range(idx - 1, idx + 2):
+            if idx >= 0:
+                filename = self.image_paths[idx]
+                filename_label = self.labels_paths[idx]
+                            
+                # Load the image                
+                image = Image.open(filename).convert("RGB")
+
+                images.append(np.array(image))
+
+                # Load the label image                
+                image = Image.open(filename_label).convert("RGBA")                
+                image = np.array(image)
+                labels.append(image)
+            else:
+                images.append(None)
+                labels.append(None)
+
+        if images[0] is None:
+            # generate an image with pure noise
+            images[0] = np.random.randint(0, 256, images[1].shape, dtype=np.uint8)
+            labels[0] = np.random.randint(0, 256, labels[1].shape, dtype=np.uint8)
+            labels[0][3] = np.zeros(*labels[1].shape[:2])
+
+        # merge 2nd and 1st images        
+        image = np.concatenate([images[0], images[1]], axis=0)        
         pixels = feature_extractor(images=image, return_tensors="pt")["pixel_values"].squeeze(0)
 
         # Load the label image
-        image_path = filename_label
-        image = Image.open(image_path).convert("RGBA")        
-        pixels_label = self.mask_transform(image)
-
+        pixels_label = np.concatenate([labels[2], labels[1]], axis=0)    
+        pixels_label = self.mask_transform(Image.fromarray(pixels_label))
+        
         # only use the alpha channel to determine the mask
         mask = pixels_label[3,:,:]
                 
@@ -111,21 +132,19 @@ class VehicleSegmentationAugmentedDataset(Dataset):
 
         images, image_labels = generate_random_sequence(self.fg_image_paths, self.bg_image_paths, length=[self.sequence_range, self.sequence_range])
 
-        pixels_values_seq = []
-        mask_seq = []
+        # stack 2nd, 1st images
+        image_input = np.concatenate([images[1], images[0]], axis=0)
+        # stack 2nd and 3rd labels
+        label_input = np.concatenate([image_labels[2], image_labels[0]], axis=0)
 
-        for im, label in zip(images, image_labels):                
-            pixels = feature_extractor(images=im, return_tensors="pt")["pixel_values"].squeeze(0)                  
-            arr_uint8 = (np.clip(label, 0, 1) * 255).astype(np.uint8)
-            pixels_label = self.mask_transform(Image.fromarray(arr_uint8))
+        pixels = feature_extractor(images=image_input, return_tensors="pt")["pixel_values"].squeeze(0)                  
+        arr_uint8 = (np.clip(label_input, 0, 1) * 255).astype(np.uint8)
+        pixels_label = self.mask_transform(Image.fromarray(arr_uint8))
 
-            # only use the alpha channel to determine the mask
-            mask = pixels_label[3,:,:]
+        # only use the alpha channel to determine the mask
+        mask = pixels_label[3,:,:]
 
-            pixels_values_seq.append(pixels)
-            mask_seq.append(mask)
-
-        return {"pixel_values": pixels_values_seq, "labels": mask_seq}
+        return {"pixel_values": pixels, "labels": mask}
 
 
 # Paths to your data directories
@@ -168,7 +187,7 @@ eval_dataset = VehicleSegmentationDataset(
 #)
 
 # Create DataLoaders
-train_loader = DataLoader(train_dataset, batch_size=16, shuffle=True, num_workers=4)
-val_loader = DataLoader(val_dataset, batch_size=16, shuffle=False, num_workers=4)
-eval_loader = DataLoader(eval_dataset, batch_size=16, shuffle=False, num_workers=4)
+train_loader = DataLoader(train_dataset, batch_size=8, shuffle=True, num_workers=4)
+val_loader = DataLoader(val_dataset, batch_size=8, shuffle=False, num_workers=4)
+eval_loader = DataLoader(eval_dataset, batch_size=8, shuffle=False, num_workers=4)
 

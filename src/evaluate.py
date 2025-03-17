@@ -60,10 +60,20 @@ def evaluate_model(checkpoint_path):
             
             logits = model(**{"pixel_values": pixel_values})
             
+            # only look at the bottom half of the images, that is the current frame predition (the top is the 'next' frame predition)
+            _, _, height, width = logits.shape 
+            height_half = int(height / 2)            
+            logits = logits[:,:,height_half:,:]
+            labels = labels[:,height_half:,:]
+            labels_long = labels_long[:,height_half:,:]
+            pixel_values = pixel_values[:,:,height_half:,:]
+            
             loss = criterion(logits, labels)
             total_batches += 1
             
             # For IoU, get predicted class for each pixel
+            pred_probs = torch.softmax(logits, dim=1)
+            pred_probs[pred_probs < 0.5] = 0.0
             preds = torch.argmax(logits, dim=1)  # (B, H, W)
 
             if idx not in eval_dataset.ignored_frames:
@@ -73,12 +83,12 @@ def evaluate_model(checkpoint_path):
             #print((labels > 0).sum())
             
             for i in range(pixel_values.shape[0]):
-                bbox = get_bounding_box_from_mask(preds[i].squeeze().detach().cpu().numpy())
+                bbox = get_bounding_box_from_mask(pred_probs[i][1].squeeze().detach().cpu().numpy())
                 im = torch_to_cv2_image(pixel_values[i].detach())  
-                if idx not in eval_dataset.ignored_frames:              
-                    im = overlay_mask_on_image(im, labels[i].detach().cpu().numpy(), color=(255, 0, 255), alpha=0.35)
-                    iou_metric.update(preds[i], labels_long[i])
                 
+                im = overlay_mask_on_image(im, pred_probs[i][1].detach().cpu().numpy(), color=(255, 0, 255), alpha=1.0)                    
+                iou_metric.update(preds[i], labels_long[i])
+            
                 if bbox:
                     x1, y1, x2, y2 = bbox
                     cv2.rectangle(im, (x1, y1), (x2, y2), color=(0, 0, 255), thickness=2)
