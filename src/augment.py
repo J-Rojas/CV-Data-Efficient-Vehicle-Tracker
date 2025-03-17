@@ -130,9 +130,15 @@ def generate_random_sequence(files_fg, files_bg,
                              position_range=[0.0, 1.0], 
                              velocity_range=[0.1, 0.5],  
                              velocity_noise=[0.01, 0.05]):
+    length = 3
+    start[0][0] = min(start[0][0], len(files_fg) - length)
+    start[0][1] = min(start[0][1], len(files_fg) - length)
+    start[1][0] = min(start[1][0], len(files_bg) - length)
+    start[1][1] = min(start[1][1], len(files_bg) - length)
+    
     # Select a sequential set of images ensuring continuity in selection
     img_ranges = torch.tensor([torch.randint(*start[0], (1,)), torch.randint(*start[1], (1,))])
-    length = 1
+    
     img_ranges = torch.vstack((img_ranges, img_ranges + length)).squeeze().T
 
     # adjust ranges
