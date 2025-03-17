@@ -20,18 +20,19 @@ class SegmentationLightning(pl.LightningModule):
         self.save_hyperparameters()
         # Load the feature extractor and model
         model_name = "nvidia/segformer-b0-finetuned-cityscapes-512-1024"
-        config = SegformerConfig(num_labels = num_classes, classifier_dropout_prob=0.1)
+        config = SegformerConfig(num_labels = num_classes, classifier_dropout_prob=0.2)
         self.model = SegformerForSemanticSegmentation.from_pretrained(model_name, config=config, ignore_mismatched_sizes=True)
         self.model.decode_head.classifier.apply(init_weights)
-        #self.model = SegmentationModel(backbone_model_name=backbone_name, num_classes=num_classes)
-        # Use per-pixel CrossEntropyLoss (expects logits of shape [B, C, H, W] and labels of shape [B, H, W])
-        #self.criterion = nn.CrossEntropyLoss()
+        
         self.lr = lr        
-
+        
         for param in self.model.parameters():
             param.requires_grad = False
         for param in self.model.decode_head.parameters():
             param.requires_grad = True
+
+        print(self.model)
+
 
     def forward(self, pixel_values):
         outputs = self.model(pixel_values)
@@ -57,7 +58,8 @@ class SegmentationLightning(pl.LightningModule):
         dice = dice_loss(pred_probs, target_two_channel)
         # Compute boundary-aware loss, this already uses the CE loss
         b_loss = 0.0 #boundary_aware_loss(logits, targets, use_bce=True)
-        return alpha * (floss + b_loss) + (1 - alpha) * dice
+        iou = 0 # iou_loss(pred_probs[:,1,:,:], targets)
+        return alpha * (iou + floss + b_loss) + (1 - alpha) * dice
 
     def criterion(self, logits, targets):
         seg_loss = self.combined_loss(logits, targets)
@@ -89,16 +91,24 @@ class SegmentationLightning(pl.LightningModule):
 
         return mse_loss # + iou_loss(pred_positive, targets)
 
-
     def training_step(self, batch, batch_idx):
+        # ensure dropout is enabled
         self.model.decode_head.train(True)
+        if type(batch["pixel_values"]) == list:
+            pixel_values = torch.stack(batch["pixel_values"], dim=0) 
+            labels = torch.stack(batch["labels"], dim=0)     # (B, S, 3, H, W)
 
-        pixel_values = batch["pixel_values"]      # (B, 3, H, W)
-        
+            # roll the sequence into the batch dimension
+            pixel_values = pixel_values.view(-1, *pixel_values.shape[2:])
+            labels = labels.view(-1, *labels.shape[2:])
+        else:
+            pixel_values = batch["pixel_values"]
+            labels = batch["labels"]
+
         # Forward pass: get the logits
         logits = self.forward(**{"pixel_values": pixel_values})
         
-        labels = batch["labels"].squeeze() # (B, H, W) with class indices
+        labels = labels.squeeze() # (B, H, W) with class indices
         
         total_loss = self.criterion(logits, labels)
 
@@ -106,12 +116,24 @@ class SegmentationLightning(pl.LightningModule):
         return total_loss
 
     def validation_step(self, batch, batch_idx):
-        pixel_values = batch["pixel_values"]
-        labels = batch["labels"].squeeze()
-        logits = self(pixel_values)
-        loss = self.focal_loss(logits, labels)
-        self.log("val_loss", loss, on_step=False, on_epoch=True, prog_bar=True)
-        return loss
+        pixel_values = batch["pixel_values"]      # (B, S, 3, H, W)
+
+        # roll the sequence into the batch dimension
+        if len(pixel_values.shape) == 5:
+            pixel_values = torch.stack(batch["pixel_values"], dim=0)
+            pixel_values = pixel_values.view(-1, *pixel_values.shape[2:])
+            labels = torch.stack(batch["labels"], dim=0)
+            labels = labels.view(-1, *labels.shape[2:])
+            
+        # Forward pass: get the logits
+        logits = self.forward(**{"pixel_values": pixel_values})
+        
+        labels = batch["labels"].squeeze() # (B, H, W) with class indices
+        
+        total_loss = self.criterion(logits, labels)
+
+        self.log("val_loss", total_loss, on_step=True, on_epoch=True, prog_bar=True)
+        return total_loss
 
     def configure_optimizers(self):
         optimizer = torch.optim.AdamW(self.parameters(), lr=self.lr)
@@ -121,14 +143,13 @@ class SegmentationLightning(pl.LightningModule):
         from .loader import train_loader
         return train_loader
 
+    def val_dataloader(self):
+        from .loader import val_loader
+        return val_loader
+
 # Example usage:
 if __name__ == '__main__':
-    # Load feature extractor to preprocess images
-    feature_extractor = AutoFeatureExtractor.from_pretrained("microsoft/swin-tiny-patch4-window7-224")
-    # Initialize our custom segmentation model using Swin-Tiny as backbone
-    num_classes = 2  # For example, background vs. vehicle
-    model = SegmentationLightning()
-
+    
     if os.path.exists("./checkpoints/last.ckpt"):
         os.remove("./checkpoints/last.ckpt")
 
@@ -142,5 +163,30 @@ if __name__ == '__main__':
         dirpath="checkpoints/"
     )
 
-    trainer = Trainer(max_epochs=10, callbacks=[checkpoint_callback])
-    trainer.fit(model)
+    best_model = None
+    best_avg_loss = float('inf')
+
+    # Evaluate each seed by training for a few steps
+    for seed in range(5):
+        
+        # Reinitialize model and trainer
+        model = SegmentationLightning()
+        trainer = Trainer(
+            max_steps=1,                 # Train for 50 steps (adjust as needed)
+            logger=False,                 # Disable logging for quick evaluation
+            enable_checkpointing=False,
+            enable_progress_bar=False            
+        )
+        
+        trainer.fit(model)
+        
+        # Retrieve the training loss from the logged metrics
+        loss_tensor = trainer.callback_metrics.get("train_loss")
+        avg_loss = loss_tensor.item() if loss_tensor is not None else float('inf')
+        if avg_loss < best_avg_loss:
+            best_avg_loss = avg_loss
+            best_model = model
+        
+
+    trainer = Trainer(max_epochs=40, callbacks=[checkpoint_callback])
+    trainer.fit(best_model)

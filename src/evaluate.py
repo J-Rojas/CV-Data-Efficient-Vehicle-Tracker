@@ -9,6 +9,7 @@ from .loader import eval_loader, eval_dataset
 from .detector import SegmentationLightning  
 from .tools import get_bounding_box_from_mask, torch_to_cv2_image, overlay_mask_on_image
 
+OUTPUT_SIZE = [640, 272]
 
 def evaluate_model(checkpoint_path):
     # Load the trained model from a checkpoint.
@@ -33,13 +34,21 @@ def evaluate_model(checkpoint_path):
     with torch.no_grad():
         for batch in eval_loader:
 
-            pixel_values = batch["pixel_values"].to(model.device)  # (B, 3, H, W)
-            labels = batch["labels"].to(model.device)
+            pixel_values = batch["pixel_values"]
+            labels = batch["labels"]
+
+            if type(pixel_values) == list:
+                pixel_values = pixel_values[0]
+                labels = labels[0]
+
+            pixel_values = pixel_values.to(model.device)  # (B, 3, H, W)
+            labels = labels.to(model.device)
+            
             labels_long = labels.long()
 
             if video_out is None:
                 layers, height, width = pixel_values.shape[1:]
-                size = (width, height)
+                size = OUTPUT_SIZE
                 video_out = cv2.VideoWriter("output_video.mp4",
                       cv2.VideoWriter_fourcc(*'mp4v'),
                       15, size)
@@ -67,12 +76,14 @@ def evaluate_model(checkpoint_path):
                 bbox = get_bounding_box_from_mask(preds[i].squeeze().detach().cpu().numpy())
                 im = torch_to_cv2_image(pixel_values[i].detach())  
                 if idx not in eval_dataset.ignored_frames:              
-                    im = overlay_mask_on_image(im, labels[i].detach().cpu().numpy(), color=(255, 0, 255), alpha=1.0)
+                    im = overlay_mask_on_image(im, labels[i].detach().cpu().numpy(), color=(255, 0, 255), alpha=0.35)
                     iou_metric.update(preds[i], labels_long[i])
                 
                 if bbox:
                     x1, y1, x2, y2 = bbox
                     cv2.rectangle(im, (x1, y1), (x2, y2), color=(0, 0, 255), thickness=2)
+
+                im = cv2.resize(im, OUTPUT_SIZE, interpolation=cv2.INTER_CUBIC)
 
                 video_out.write(im)
 
