@@ -133,10 +133,10 @@ class VehicleSegmentationAugmentedDataset(Dataset):
         images, image_labels = generate_random_sequence(self.fg_image_paths, self.bg_image_paths, length=[self.sequence_range, self.sequence_range])
 
         # stack 2nd, 1st images
-        image_input = np.concatenate([images[1], images[0]], axis=0)
+        image_input: NDArray[Any] = np.concatenate([images[0], images[1]], axis=0)
         # stack 2nd and 3rd labels
-        label_input = np.concatenate([image_labels[2], image_labels[0]], axis=0)
-
+        label_input = np.concatenate([image_labels[2], image_labels[1]], axis=0)
+        
         pixels = feature_extractor(images=image_input, return_tensors="pt")["pixel_values"].squeeze(0)                  
         arr_uint8 = (np.clip(label_input, 0, 1) * 255).astype(np.uint8)
         pixels_label = self.mask_transform(Image.fromarray(arr_uint8))
