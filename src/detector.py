@@ -132,12 +132,21 @@ class SegmentationLightning(pl.LightningModule):
         
         total_loss = self.criterion(logits, labels)
 
+        lr = self.trainer.optimizers[0].param_groups[0]['lr']
+        self.log("lr", lr, on_step=False, on_epoch=True, prog_bar=True)
         self.log("val_loss", total_loss, on_step=True, on_epoch=True, prog_bar=True)
         return total_loss
 
     def configure_optimizers(self):
         optimizer = torch.optim.AdamW(self.parameters(), lr=self.lr)
-        return optimizer
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=5, threshold_mode="abs")
+        return {
+            "optimizer": optimizer,
+            "lr_scheduler": {
+                "scheduler": scheduler,
+                "monitor": "val_loss",  # this should be the metric you wish to monitor
+            },
+        }
         
     def train_dataloader(self):
         from .loader import train_loader
