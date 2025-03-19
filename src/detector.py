@@ -5,6 +5,7 @@ from transformers import AutoFeatureExtractor, AutoModel, SegformerForSemanticSe
 import pytorch_lightning as pl
 from pytorch_lightning import Trainer
 from pytorch_lightning.callbacks import ModelCheckpoint
+from torchmetrics import JaccardIndex
 from .losses import dice_loss, total_variation_loss, boundary_aware_loss, focal_loss, iou_loss
 
 def init_weights(m):
@@ -23,6 +24,7 @@ class SegmentationLightning(pl.LightningModule):
         config = SegformerConfig(num_labels = num_classes, classifier_dropout_prob=0.2)
         self.model = SegformerForSemanticSegmentation.from_pretrained(model_name, config=config, ignore_mismatched_sizes=True)
         self.model.decode_head.classifier.apply(init_weights)
+        self.iou_metric = JaccardIndex(task="multiclass", num_classes=2).to(self.model.device)
         
         self.lr = lr        
         
@@ -91,6 +93,10 @@ class SegmentationLightning(pl.LightningModule):
 
         return mse_loss # + iou_loss(pred_positive, targets)
 
+    def validation_metric(self, logits, labels):
+        preds = torch.argmax(logits, dim=1)  # (B, H, W)        
+        self.iou_metric.update(preds, labels)
+
     def training_step(self, batch, batch_idx):
         # ensure dropout is enabled
         self.model.decode_head.train(True)
@@ -124,18 +130,40 @@ class SegmentationLightning(pl.LightningModule):
             pixel_values = pixel_values.view(-1, *pixel_values.shape[2:])
             labels = torch.stack(batch["labels"], dim=0)
             labels = labels.view(-1, *labels.shape[2:])
-            
+
         # Forward pass: get the logits
         logits = self.forward(**{"pixel_values": pixel_values})
         
         labels = batch["labels"].squeeze() # (B, H, W) with class indices
+    
+        labels_long = labels.long()
+
+        # look at bottom half of the images    
+        _, _, height, width = logits.shape 
+        height_half = int(height / 2)            
+        logits = logits[:,:,height_half:,:]
+        labels = labels[:,height_half:,:]
+        labels_long = labels_long[:,height_half:,:]
+        pixel_values = pixel_values[:,:,height_half:,:]
         
         total_loss = self.criterion(logits, labels)
-
+        
         lr = self.trainer.optimizers[0].param_groups[0]['lr']
+        
+        self.validation_metric(logits, labels_long)
+
         self.log("lr", lr, on_step=False, on_epoch=True, prog_bar=True)
         self.log("val_loss", total_loss, on_step=True, on_epoch=True, prog_bar=True)
         return total_loss
+
+    def on_validation_epoch_start(self) -> None:
+        self.iou_metric.reset()
+        return super().on_validation_epoch_start()
+
+    def on_validation_epoch_end(self) -> None:
+        iou = self.iou_metric.compute().item()
+        self.log("IoU", iou, on_step=False, on_epoch=True, prog_bar=True)
+        return super().on_validation_epoch_end()
 
     def configure_optimizers(self):
         optimizer = torch.optim.AdamW(self.parameters(), lr=self.lr)
