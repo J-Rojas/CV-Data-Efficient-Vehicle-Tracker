@@ -21,7 +21,7 @@ class SegmentationLightning(pl.LightningModule):
         self.save_hyperparameters()
         # Load the feature extractor and model
         model_name = "nvidia/segformer-b0-finetuned-cityscapes-512-1024"
-        config = SegformerConfig(num_labels = num_classes, classifier_dropout_prob=0.2)
+        config = SegformerConfig(num_labels = num_classes, classifier_dropout_prob=0.5)
         self.model = SegformerForSemanticSegmentation.from_pretrained(model_name, config=config, ignore_mismatched_sizes=True)
         self.model.decode_head.classifier.apply(init_weights)
         self.iou_metric = JaccardIndex(task="multiclass", num_classes=2).to(self.model.device)
@@ -64,7 +64,8 @@ class SegmentationLightning(pl.LightningModule):
         return alpha * (iou + floss + b_loss) + (1 - alpha) * dice
 
     def criterion(self, logits, targets):
-        seg_loss = self.combined_loss(logits, targets)
+        use_bce = False
+        seg_loss = self.combined_loss(logits, targets) 
 
         # Compute TV loss on the predicted probabilities (or on logits)
         # Here, we apply softmax to obtain probability maps
@@ -72,15 +73,18 @@ class SegmentationLightning(pl.LightningModule):
         # Extract the probability for the positive class (assume index 1)
         pred_positive = prob_maps[:, 1, :, :]   # shape: (B, H, W)
 
-        # Compute MSE loss between the predicted vehicle probability and fuzzy label
-        mse_loss = nn.functional.mse_loss(pred_positive, targets)
+        # Compute MSE loss between the predicted vehicle probability and fuzzy label   
+        if use_bce:             
+            loss = nn.functional.binary_cross_entropy_with_logits(pred_positive, targets)
+        else:
+            loss = nn.functional.mse_loss(pred_positive, targets)
 
         tv_loss = total_variation_loss(prob_maps)
         
         # Define a hyperparameter to weight the TV loss
         lambda_tv = 0.1
-        lambda_mse = 0.7
-        total_loss = lambda_mse * mse_loss + (1 - lambda_mse) * seg_loss + lambda_tv * tv_loss
+        lambda_ce = 0.9
+        total_loss = lambda_ce * loss + (1 - lambda_ce) * seg_loss + lambda_tv * tv_loss
 
         return total_loss
 
