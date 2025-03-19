@@ -70,8 +70,8 @@ class VehicleSegmentationDataset(Dataset):
 
         if images[0] is None:
             # generate an image with pure noise
-            images[0] = np.random.randint(0, 256, images[1].shape, dtype=np.uint8)
-            labels[0] = np.random.randint(0, 256, labels[1].shape, dtype=np.uint8)
+            images[0] = images[1].copy()
+            labels[0] = labels[1].copy()
             labels[0][3] = np.zeros(*labels[1].shape[:2])
 
         # merge 2nd and 1st images        
