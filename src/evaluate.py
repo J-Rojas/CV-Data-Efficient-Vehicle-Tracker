@@ -63,18 +63,26 @@ def evaluate_model(checkpoint_path):
             # only look at the bottom half of the images, that is the current frame predition (the top is the 'next' frame predition)
             _, _, height, width = logits.shape 
             height_half = int(height / 2)            
+            
+            # next frame prediction
+            logits_next = logits[:,:,:height_half,:]
+
             logits = logits[:,:,height_half:,:]
             labels = labels[:,height_half:,:]
             labels_long = labels_long[:,height_half:,:]
             pixel_values = pixel_values[:,:,height_half:,:]
             
+            
             loss = criterion(logits, labels)
             total_batches += 1
             
             # For IoU, get predicted class for each pixel
-            pred_probs = torch.softmax(logits, dim=1)
-            pred_probs[pred_probs < 0.5] = 0.0
+            temp = 5
+            pred_probs = torch.softmax(logits / temp, dim=1)
+            pred_probs[pred_probs < 0.8] = 0.0
             preds = torch.argmax(logits, dim=1)  # (B, H, W)
+            # next frame prediction
+            pred_probs_next = torch.softmax(logits_next / temp, dim=1)            
 
             if idx not in eval_dataset.ignored_frames:
                 total_loss += loss.item()
@@ -86,7 +94,8 @@ def evaluate_model(checkpoint_path):
                 bbox = get_bounding_box_from_mask(pred_probs[i][1].squeeze().detach().cpu().numpy())
                 im = torch_to_cv2_image(pixel_values[i].detach())  
                 
-                im = overlay_mask_on_image(im, pred_probs[i][1].detach().cpu().numpy(), color=(255, 0, 255), alpha=1.0)                    
+                im = overlay_mask_on_image(im, pred_probs[i][1].detach().cpu().numpy(), color=(255, 0, 255), alpha=0.75)                    
+                #im = overlay_mask_on_image(im, pred_probs_next[i][1].detach().cpu().numpy(), color=(0, 0, 255), alpha=0.75)                    
                 iou_metric.update(preds[i], labels_long[i])
             
                 if bbox:
