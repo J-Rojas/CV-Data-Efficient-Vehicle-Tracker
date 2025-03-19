@@ -1,5 +1,7 @@
+from numpy._typing._array_like import NDArray
 import os
 import glob
+from typing import Any
 import numpy as np
 from PIL import Image, ImageDraw
 import torch
@@ -51,9 +53,9 @@ class VehicleSegmentationDataset(Dataset):
         images = []
         labels = []
         for i in range(idx - 1, idx + 2):
-            if idx >= 0:
-                filename = self.image_paths[idx]
-                filename_label = self.labels_paths[idx]
+            if 0 <= i < len(self.image_paths):
+                filename = self.image_paths[i]
+                filename_label = self.labels_paths[i]
                             
                 # Load the image                
                 image = Image.open(filename).convert("RGB")
@@ -68,11 +70,11 @@ class VehicleSegmentationDataset(Dataset):
                 images.append(None)
                 labels.append(None)
 
-        if images[0] is None:
-            # generate an image with pure noise
-            images[0] = images[1].copy()
-            labels[0] = labels[1].copy()
-            labels[0][3] = np.zeros(*labels[1].shape[:2])
+        for i in range(len(images)):
+            if images[i] is None:
+                # generate an image with pure noise
+                images[i] = images[1].copy()
+                labels[i] = labels[1].copy()            
 
         # merge 2nd and 1st images        
         image = np.concatenate([images[0], images[1]], axis=0)        
@@ -130,21 +132,43 @@ class VehicleSegmentationAugmentedDataset(Dataset):
     
     def __getitem__(self, idx):
 
-        images, image_labels = generate_random_sequence(self.fg_image_paths, self.bg_image_paths, length=[self.sequence_range, self.sequence_range])
+        images, image_labels, bboxes = generate_random_sequence(self.fg_image_paths, self.bg_image_paths, length=[self.sequence_range, self.sequence_range])
+
+        #print(bboxes)
 
         # stack 2nd, 1st images
         image_input: NDArray[Any] = np.concatenate([images[0], images[1]], axis=0)
         # stack 2nd and 3rd labels
         label_input = np.concatenate([image_labels[2], image_labels[1]], axis=0)
+        # reposition bboxes for merge
+        bboxes[0] = np.array([bboxes[0][0] + images[0].shape[0], bboxes[0][1], bboxes[0][2] + images[0].shape[0], bboxes[0][3]])
         
         pixels = feature_extractor(images=image_input, return_tensors="pt")["pixel_values"].squeeze(0)                  
         arr_uint8 = (np.clip(label_input, 0, 1) * 255).astype(np.uint8)
         pixels_label = self.mask_transform(Image.fromarray(arr_uint8))
 
+        #print(pixels.shape, image_input.shape)
+
+        # image scaling factor
+        scale_y = float(pixels.shape[1]) / image_input.shape[0] # pixels is in C, H, W, image_input is in H, W, C
+        scale_x = float(pixels.shape[2]) / image_input.shape[1]
+
+        # recalculate bboxes after image rescaling
+        scale_matrix = np.array([[scale_y, 0.0], [0.0, scale_x]])
+        
+
+        #print("scale", scale_matrix)
+        #print("bboxes before", bboxes)
+        bboxes_trans = np.array([np.matmul(scale_matrix, bbox.reshape(2, 2).T).T.reshape(4) for bbox in bboxes]).astype(int)
+        #print("bboxes", bboxes_trans)
+
+        
+        #print(bboxes_trans)
+
         # only use the alpha channel to determine the mask
         mask = pixels_label[3,:,:]
 
-        return {"pixel_values": pixels, "labels": mask}
+        return {"pixel_values": pixels, "labels": mask, "boxes": bboxes_trans}
 
 
 # Paths to your data directories
