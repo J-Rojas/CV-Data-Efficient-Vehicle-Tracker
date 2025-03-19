@@ -6,7 +6,7 @@ import pytorch_lightning as pl
 from pytorch_lightning import Trainer
 from pytorch_lightning.callbacks import ModelCheckpoint
 from torchmetrics import JaccardIndex
-from .losses import dice_loss, total_variation_loss, boundary_aware_loss, focal_loss, iou_loss
+from .losses import dice_loss, total_variation_loss, boundary_aware_loss, focal_loss, iou_loss, iou_consistency_loss
 
 def init_weights(m):
     if isinstance(m, nn.Conv2d):
@@ -63,8 +63,8 @@ class SegmentationLightning(pl.LightningModule):
         iou = 0 # iou_loss(pred_probs[:,1,:,:], targets)
         return alpha * (iou + floss + b_loss) + (1 - alpha) * dice
 
-    def criterion(self, logits, targets):
-        use_bce = False
+    def criterion(self, logits, targets, boxes=None):
+        use_bce = True
         seg_loss = self.combined_loss(logits, targets) 
 
         # Compute TV loss on the predicted probabilities (or on logits)
@@ -81,10 +81,15 @@ class SegmentationLightning(pl.LightningModule):
 
         tv_loss = total_variation_loss(prob_maps)
         
+        cons_loss = 0
+        if boxes:
+            cons_loss = iou_consistency_loss(pred_positive, boxes[0], boxes[1])
+
         # Define a hyperparameter to weight the TV loss
         lambda_tv = 0.1
         lambda_ce = 0.9
-        total_loss = lambda_ce * loss + (1 - lambda_ce) * seg_loss + lambda_tv * tv_loss
+        lambda_cons = 0.0
+        total_loss = lambda_ce * loss + (1 - lambda_ce) * seg_loss + lambda_tv * tv_loss + lambda_cons * cons_loss
 
         return total_loss
 
@@ -115,12 +120,16 @@ class SegmentationLightning(pl.LightningModule):
             pixel_values = batch["pixel_values"]
             labels = batch["labels"]
 
+        bboxes = batch["boxes"]
+        bboxes_slices_reg1=  bboxes[:,1]
+        bboxes_slices_reg2= bboxes[:,2]
+        
         # Forward pass: get the logits
         logits = self.forward(**{"pixel_values": pixel_values})
         
         labels = labels.squeeze() # (B, H, W) with class indices
         
-        total_loss = self.criterion(logits, labels)
+        total_loss = self.criterion(logits, labels, boxes=[bboxes_slices_reg1, bboxes_slices_reg2])
 
         self.log("train_loss", total_loss, on_step=True, on_epoch=True, prog_bar=True)
         return total_loss

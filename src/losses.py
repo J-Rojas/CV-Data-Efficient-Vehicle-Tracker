@@ -71,6 +71,39 @@ def total_variation_loss(x):
         w_diff = torch.abs(x[:, :, :, 1:] - x[:, :, :, :-1]).mean()
         return h_diff + w_diff
 
+def consistency_loss(x, bbox1, bbox2):
+    """
+    This loss compares two different regions for similarity, the more dissimilar the higher the loss
+    """
+    
+    total = 0
+    for b, bb1, bb2 in zip(x, bbox1, bbox2):
+        # ensure the boxes are same in sizes        
+        region1 = b[bb1[0]:bb1[2], bb1[1]:bb1[3]]
+        region2 = b[bb2[0]:bb2[2], bb2[1]:bb2[3]]
+        region2 = region2[:region1.shape[0], :region1.shape[1]]
+        region1 = region1[:region2.shape[0], :region2.shape[1]]
+        total = total + ((region1 - region2) ** 2).mean()
+
+    return total
+
+def iou_consistency_loss(x, bbox1, bbox2):
+
+    """
+    This loss compares two different regions using the IoU loss, the more dissimilar the higher the loss
+    """
+    
+    total = 0
+    for b, bb1, bb2 in zip(x, bbox1, bbox2):
+        # ensure the boxes are same in sizes        
+        region1 = b[bb1[0]:bb1[2], bb1[1]:bb1[3]]
+        region2 = b[bb2[0]:bb2[2], bb2[1]:bb2[3]]
+        region2 = region2[:region1.shape[0], :region1.shape[1]]
+        region1 = region1[:region2.shape[0], :region2.shape[1]]
+        total += iou_loss(region1.unsqueeze(0), region2.unsqueeze(0))
+
+    return total
+
 # A simple focal loss implementation, deal with class imbalances due to pixels being biased towards background class
 def focal_loss(logits, targets, alpha=0.8, gamma=2.0, use_bce=False):
     # logits: (B, num_classes, H, W)
