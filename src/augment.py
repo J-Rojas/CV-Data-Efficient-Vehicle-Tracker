@@ -20,7 +20,7 @@ import math
 def get_fixed_fg_params():
     return {
         "rotate": 0, 
-        "scale": random.uniform(0.5, 1.5),
+        "scale": random.uniform(0.8, 1.2),
         "shear": (random.uniform(-10, 10), random.uniform(-10, 10)),
         "brightness": random.uniform(0.7, 1.3),  
         "contrast": random.uniform(0.7, 1.3),
@@ -164,6 +164,7 @@ def generate_random_sequence(files_fg, files_bg,
 
     sequence = []
     sequence_labels = []
+    sequence_bbox = []
     
     for fg_path, bg_path in zip(selected_fg, selected_bg):
         fg = cv2.imread(fg_path, cv2.IMREAD_UNCHANGED)
@@ -209,10 +210,10 @@ def generate_random_sequence(files_fg, files_bg,
 
         sequence.append(bg_trans)
 
-        fg_label = np.zeros((bg_trans.shape[0], bg_trans.shape[1], 4))
-        fg_label[pos_y:y_end, pos_x:x_end] = np.concatenate([blend_fg, alpha_norm[:, :, np.newaxis]], axis=2)
+        fg_label = np.zeros((bg_trans.shape[0], bg_trans.shape[1], 4), dtype=np.uint8)
+        fg_label[pos_y:y_end, pos_x:x_end] = np.concatenate([blend_fg, alpha_norm[:, :, np.newaxis] * 255], axis=2)
         sequence_labels.append(fg_label)
-
+        
         # Update the foreground's normalized position.
         velocity_magnitude = random.uniform(velocity_range[0], velocity_range[1]) * fg_trans.shape[1]
         velocity = direction_vector * velocity_magnitude
@@ -220,7 +221,9 @@ def generate_random_sequence(files_fg, files_bg,
         start_position += velocity / np.array([bg_trans.shape[1], bg_trans.shape[0]])
         start_position = np.clip(start_position, 0.0, 1.0)
 
-    return sequence, sequence_labels
+        sequence_bbox.append(np.array([pos_y, pos_x, y_end, x_end]))
+
+    return sequence, sequence_labels, sequence_bbox
 
 
 if __name__ == '__main__':
@@ -240,9 +243,10 @@ if __name__ == '__main__':
     foreground = list(map(lambda x: x[1], filter(lambda x: x[0] not in ignore, enumerate(foreground))))
     background = list(map(lambda x: x[1], filter(lambda x: x[0] not in ignore, enumerate(background))))
     
-    merged, labels = generate_random_sequence(foreground, background, position_range=[0, 0.5])
+    merged, labels, _ = generate_random_sequence(foreground, background, position_range=[0, 0.5])
 
-    for idx, im in enumerate(merged):
+    for idx, (im, label) in enumerate(zip(merged, labels)):
         cv2.imwrite(f"data_sequence/{idx}.jpg", im)
+        cv2.imwrite(f"data_sequence/{idx}_label.png", label)
 
     
