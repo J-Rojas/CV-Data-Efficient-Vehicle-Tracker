@@ -1,6 +1,7 @@
 import cv2
 import numpy as np
 import math
+from numpy.lib.stride_tricks import sliding_window_view
 
 def get_bounding_box_from_mask(mask) -> tuple | None:
     """
@@ -290,3 +291,103 @@ def save_with_transparency(image, output_path):
     
     # Save the image as PNG
     cv2.imwrite(output_path, bgra)
+
+def iou(box1, box2):
+    # Determine the coordinates of the intersection rectangle
+    x_left   = max(box1[0], box2[0])
+    y_top    = max(box1[1], box2[1])
+    x_right  = min(box1[2], box2[2])
+    y_bottom = min(box1[3], box2[3])
+    
+    # If there is no overlap, the intersection area is zero.
+    if x_right < x_left or y_bottom < y_top:
+        return 0.0
+    
+    # Compute the area of the intersection rectangle
+    intersection_area = (x_right - x_left) * (y_bottom - y_top)
+    
+    # Compute the area of both bounding boxes
+    box1_area = (box1[2] - box1[0]) * (box1[3] - box1[1])
+    box2_area = (box2[2] - box2[0]) * (box2[3] - box2[1])
+    
+    # Compute the union area by using the formula: union = A + B - intersection
+    union_area = box1_area + box2_area - intersection_area
+    
+    # Compute the IoU
+    iou_value = intersection_area / union_area
+    return iou_value
+
+def slice_from_bbox(bbox):
+    return slice(bbox[0], bbox[2]), slice(bbox[1], bbox[3])
+
+def normalized_cross_correlation(patch1, patch2):
+    # Ensure patches are floating point
+    patch1 = patch1.astype(np.float32)
+    patch2 = patch2.astype(np.float32)
+    
+    # Subtract mean
+    patch1_mean = patch1 - np.mean(patch1)
+    patch2_mean = patch2 - np.mean(patch2)
+    
+    # Compute numerator and denominator
+    numerator = np.sum(patch1_mean * patch2_mean)
+    denominator = np.sqrt(np.sum(patch1_mean**2) * np.sum(patch2_mean**2))
+    
+    if denominator == 0:
+        return 0  # Avoid division by zero
+    return numerator / denominator
+
+def patch_matching_cross_correlation(image, template):
+    
+    # determine the larger image
+    image, template = (image, template) if image.size > template.size else (template, image)
+
+    H, W = image.shape
+    h, w = template.shape
+
+    # clip it down
+    h, w = min(H, h), min(W, w)
+    template = template[:h, :w]
+
+    # Extract all windows of the size of template from the image
+    windows = sliding_window_view(image, (h, w))  # shape: (H-h+1, W-w+1, h, w)
+
+    # Compute means and standard deviations for normalization
+    template_mean = template.mean()
+    template_std = template.std()
+
+    # Compute window means and standard deviations along the last two axes (the window dimensions)
+    windows_mean = windows.mean(axis=(-1, -2))
+    windows_std = windows.std(axis=(-1, -2))
+
+    # Normalize windows and template
+    norm_windows = (windows - windows_mean[..., None, None])
+    norm_template = template - template_mean
+
+    # Compute cross correlation (summing the product over window dimensions)
+    numerator = np.sum(norm_windows * norm_template, axis=(-1, -2))
+    denominator = windows_std * template_std * h * w
+
+    # Avoid division by zero
+    corr_map = np.where(denominator == 0, 0, numerator / denominator)
+    return corr_map
+
+def calculate_optical_flow(frame1, frame2):
+    # Convert to grayscale, as optical flow methods usually work on single channel images
+    gray1 = cv2.cvtColor(frame1, cv2.COLOR_BGR2GRAY)
+    gray2 = cv2.cvtColor(frame2, cv2.COLOR_BGR2GRAY)
+
+    # Compute dense optical flow using Farneback method.
+    flow = cv2.calcOpticalFlowFarneback(
+        gray1,
+        gray2,     
+        flow=None,   
+        pyr_scale=0.5,      # scaling factor between pyramid layers
+        levels=3,           # number of pyramid layers
+        winsize=15,         # averaging window size; larger values can handle larger motion
+        iterations=3,       # number of iterations at each pyramid level
+        poly_n=5,           # size of pixel neighborhood for polynomial expansion
+        poly_sigma=1.2,     # standard deviation of the Gaussian that is used to smooth derivatives
+        flags=0
+    )
+    return flow
