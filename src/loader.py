@@ -78,17 +78,24 @@ class VehicleSegmentationDataset(Dataset):
 
         pad_width = ((0, 0), (0, 0), (0, 1))        
         
-        # merge 2nd and 1st images        
+        # merge 2nd and 1st images    
+        # replace with the image difference       
+        #diff_0 = images[1].mean(axis=2) - images[0].mean(axis=2)
+        #diff_1 = images[2].mean(axis=2) - images[1].mean(axis=2)        
+        #diff_image = np.stack([images[1].mean(axis=2), diff_0, diff_1]).transpose(1, 2, 0)
+        
         image = np.concatenate([images[0], images[1]], axis=0)        
         pixels = feature_extractor(images=image, return_tensors="pt")["pixel_values"].squeeze(0)
 
         # replace top
         height_half = pixels.shape[1] // 2
-        upper_half = pixels[:,:height_half,:].numpy().astype(np.uint8).transpose(1, 2, 0)
-        lower_half = pixels[:,height_half:,:].numpy().astype(np.uint8).transpose(1, 2, 0)
-        flow = torch.Tensor(np.pad(calculate_optical_flow(upper_half, lower_half), pad_width=pad_width, constant_values=0)).float().permute(2, 0, 1)
-        pixels[:,:height_half,:] = flow
-
+        #upper_half = pixels[:,:height_half,:].numpy().astype(np.uint8).transpose(1, 2, 0)
+        #lower_half = pixels[:,height_half:,:].numpy().astype(np.uint8).transpose(1, 2, 0)
+        #flow = torch.Tensor(np.pad(calculate_optical_flow(upper_half, lower_half), pad_width=pad_width, constant_values=0)).float().permute(2, 0, 1)
+        #pixels[:,:height_half,:] = flow
+        pixels[0,:height_half,:] = pixels[:,height_half:,:].mean(dim=0) - pixels[:,:height_half,:].mean(dim=0)
+        pixels[1,:height_half,:] = pixels[:,:height_half,:].mean(dim=0)
+        
         # Load the label image
         pixels_label = np.concatenate([labels[2], labels[1]], axis=0)    
         pixels_label = self.mask_transform(Image.fromarray(pixels_label))
@@ -142,7 +149,7 @@ class VehicleSegmentationAugmentedDataset(Dataset):
     def __getitem__(self, idx):
 
         images, image_labels, bboxes = generate_random_sequence(self.fg_image_paths, self.bg_image_paths, length=[self.sequence_range, self.sequence_range])
-
+        
         # stack 2nd, 1st images
         image_input: NDArray[Any] = np.concatenate([images[0], images[1]], axis=0)
         # stack 2nd and 3rd labels
@@ -157,8 +164,11 @@ class VehicleSegmentationAugmentedDataset(Dataset):
         height_half = pixels.shape[1] // 2
         upper_half = pixels[:,:height_half,:].numpy().astype(np.uint8).transpose(1, 2, 0)
         lower_half = pixels[:,height_half:,:].numpy().astype(np.uint8).transpose(1, 2, 0)
-        flow = torch.Tensor(np.pad(calculate_optical_flow(upper_half, lower_half), pad_width=pad_width, constant_values=0)).float().permute(2, 0, 1)
-        pixels[:,:height_half,:] = flow
+        #flow = torch.Tensor(np.pad(calculate_optical_flow(upper_half, lower_half), pad_width=pad_width, constant_values=0)).float().permute(2, 0, 1) 
+         
+        # replace with the image difference       
+        pixels[0,:height_half,:] = pixels[:,height_half:,:].mean(dim=0) - pixels[:,:height_half,:].mean(dim=0)
+        pixels[1,:height_half,:] = pixels[:,:height_half,:].mean(dim=0)
 
         arr_uint8 = (np.clip(label_input, 0, 1) * 255).astype(np.uint8)
         pixels_label = self.mask_transform(Image.fromarray(arr_uint8))
