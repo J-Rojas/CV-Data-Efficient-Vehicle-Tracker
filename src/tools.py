@@ -391,3 +391,17 @@ def calculate_optical_flow(frame1, frame2):
         flags=0
     )
     return flow
+
+def rescale_bboxes(src_shape, target_shape, bboxes):
+    # image scaling factor
+    scale_y = float(target_shape[0]) / src_shape[0] # pixels is in C, H, W, image_input is in H, W, C
+    scale_x = float(target_shape[1]) / src_shape[1]
+
+    # recalculate bboxes after image rescaling
+    scale_matrix = np.array([[scale_y, 0.0], [0.0, scale_x]])
+    
+    #print("scale", scale_matrix)
+    #print("bboxes before", bboxes)
+    bboxes_trans = np.array([np.matmul(scale_matrix, bbox.reshape(2, 2).T).T.reshape(4) for bbox in bboxes]).astype(int)
+    
+    return bboxes_trans

@@ -16,6 +16,9 @@ def init_weights(m):
 
 
 class SegmentationLightning(pl.LightningModule):
+
+    IMAGE_OUTPUT_SIZE = (256, 512)
+
     def __init__(self, backbone_name="google/vit-base-patch16-224", num_classes=2, lr=1e-4):
         super().__init__()
         self.save_hyperparameters()
@@ -196,6 +199,34 @@ class SegmentationLightning(pl.LightningModule):
     def val_dataloader(self):
         from .loader import val_loader
         return val_loader
+
+    def evaluate(self, pixel_values, labels=None, temp=5.0, threshold=0.8):
+
+        if pixel_values.size(0) < 4:
+            pixel_values = pixel_values.unsqueeze(0)
+
+        logits = self.forward(**{"pixel_values": pixel_values})        
+
+        # only look at the bottom half of the images, that is the current frame predition (the top is the 'next' frame predition)
+        _, _, height, width = logits.shape 
+        height_half = int(height / 2)            
+        
+        logits = logits[:,:,height_half:,:]
+        pixel_values = pixel_values[:,:,height_half:,:]
+        
+        loss = 0
+
+        if labels:
+            labels = labels[:,height_half:,:]
+            labels_long = labels.long()[:,height_half:,:]
+            loss = self.criterion(logits, labels)
+
+        pred_probs = torch.softmax(logits / temp, dim=1)
+        pred_probs[pred_probs < threshold] = 0.0
+        preds = torch.argmax(logits, dim=1)  # (B, H, W)
+        
+        return pixel_values, preds, logits, loss
+        
 
 # Example usage:
 if __name__ == '__main__':
