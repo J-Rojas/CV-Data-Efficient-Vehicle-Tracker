@@ -318,7 +318,10 @@ def iou(box1, box2):
     return iou_value
 
 def slice_from_bbox(bbox):
-    return slice(bbox[0], bbox[2]), slice(bbox[1], bbox[3])
+    return slice(bbox[0], bbox[2]+1), slice(bbox[1], bbox[3]+1)
+
+def size_from_bbox(bbox):
+    return ((bbox[2] - bbox[0]) + 1, (bbox[3] - bbox[1]) + 1)
 
 def normalized_cross_correlation(patch1, patch2):
     # Ensure patches are floating point
@@ -339,8 +342,9 @@ def normalized_cross_correlation(patch1, patch2):
 
 def patch_matching_cross_correlation(image, template):
     
+    swap =  image.size > template.size
     # determine the larger image
-    image, template = (image, template) if image.size > template.size else (template, image)
+    image, template = (image, template) if swap else (template, image)
 
     H, W = image.shape
     h, w = template.shape
@@ -370,7 +374,7 @@ def patch_matching_cross_correlation(image, template):
 
     # Avoid division by zero
     corr_map = np.where(denominator == 0, 0, numerator / denominator)
-    return corr_map
+    return corr_map, not swap
 
 def calculate_optical_flow(frame1, frame2):
     # Convert to grayscale, as optical flow methods usually work on single channel images
