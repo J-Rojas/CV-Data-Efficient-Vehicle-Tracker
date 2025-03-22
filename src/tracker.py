@@ -51,19 +51,20 @@ class TrackingObject():
         self.frame_pixels = data["frame_pixels"]
         self.regions = data["regions"]
 
+    def best_scores(self, scores):
+        return scores[1:]
+
     def compare(self, idx, pixels, use_containing_region=False):        
         pixel_regions = [self.get_containing_pixels(idx)] if use_containing_region else self.frame_pixels.get(idx) 
         if pixel_regions:
-            scores = [patch_matching_cross_correlation(pixel_region, pixels) for pixel_region in pixel_regions]
-            swaps = np.array([-1 if x[1] else 1 for x in scores])
-            scores = np.array([x[0] for x in scores])
-            pos = scores.argmax()
-            pos = np.array(np.unravel_index(pos, scores.shape))
-            swap = swaps[pos[0]]
-            if len(pos) == 1:
-                return scores.max(axis=0), np.array([0, 0])
-            pos = pos * swap
-            return scores.max(axis=0), pos[1:] if use_containing_region else pos # here, the pposition can be 3d dimensions, (region H W)
+            """use_convolve=False, pad=True, unnormalized=False"""
+            scores = [self.best_scores(patch_matching_cross_correlation(pixel_region, pixels)) for pixel_region in pixel_regions] 
+            # print(scores)
+            high_scores = list(map(lambda x: x[0], scores))
+            idx = np.argmax(high_scores)
+            pos = scores[idx][1]
+            max_score = scores[idx][0]            
+            return max_score, pos if use_containing_region else np.concatenate([idx, pos]) # here, the pposition can be 3d dimensions, (region H W)
         return np.array([0, 0]), np.array([0, 0])
 
     def get_template(self, idxes):
@@ -181,10 +182,7 @@ class Tracker():
         return im, preds.detach().numpy(), logits, loss
 
     def best_scores(self, scores):        
-        scores, swap = scores
-        pos = np.argmax(scores)
-        best = scores.max()
-        return best, np.array(np.unravel_index(pos, scores.shape)) * (-1 if swap else 1)
+        return scores[1:]
 
     def filter_detection_masks(self):
         # The detector will usually overestimate the detections and some noisy pixels near the borders
@@ -329,13 +327,6 @@ class Tracker():
     def find_good_keyframes_median(self, obj):
 
         conv_filter = np.ones(self.SLIDING_WINDOW_SIZE) / self.SLIDING_WINDOW_SIZE
-
-        tracking_bboxes = {}
-        correction_bboxes = {}
-        for obj in self.objects:
-
-            bboxes = tracking_bboxes[obj.num_id] = {}
-            cor_bboxes = correction_bboxes[obj.num_id] = {}
 
         # determine tracking stability by considering region sizes - stable sizes == good detections
         sizes = obj.get_sizes_as_array() # note: there can be missing frames in this list
@@ -503,10 +494,7 @@ class Tracker():
                 bbox = np.stack([prev, next]).mean(axis=0).astype(np.int32)
 
                 # interpolate the tracking position
-                cor_bboxes[idx] = bbox
-
-
-
+                #cor_bboxes[idx] = bbox
                 
         return tracking_bboxes, correction_bboxes
 

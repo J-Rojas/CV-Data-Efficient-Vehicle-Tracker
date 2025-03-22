@@ -2,6 +2,8 @@ import cv2
 import numpy as np
 import math
 from numpy.lib.stride_tricks import sliding_window_view
+from scipy.interpolate import UnivariateSpline
+from scipy.signal import convolve2d
 
 def get_bounding_box_from_mask(mask) -> tuple | None:
     """
@@ -340,41 +342,128 @@ def normalized_cross_correlation(patch1, patch2):
         return 0  # Avoid division by zero
     return numerator / denominator
 
-def patch_matching_cross_correlation(image, template):
+def sliding_window_median(data, window_size):
+
+    h_win, w_win = window_size
     
-    swap =  image.size > template.size
+    # Compute required padding for "same" output.
+    pad_h = (h_win - 1) // 2
+    pad_w = (w_win - 1) // 2
+    
+    # Pad the array.
+    data_padded = np.pad(data, ((pad_h, pad_h), (pad_w, pad_w)), mode='reflect')
+    
+    windows = sliding_window_view(data_padded, window_size)
+
+    # Compute the median over the last two axes (the window dimensions)
+    return np.median(windows, axis=(-1, -2))
+
+def spline_interpolation(domain_points, control_points, values, s=1.0):
+    spline = UnivariateSpline(control_points, values, s=s)    
+    return spline(domain_points)
+
+def patch_matching_cross_correlation(image, template, use_convolve=False, pad=False, unnormalized=False):
+
+    swap =  image.size >= template.size
     # determine the larger image
     image, template = (image, template) if swap else (template, image)
+    
+    # pad the image by the size of the template to allow finding negative offsets
+    H, W = image.shape
+    h, w = template.shape
+    
+    if use_convolve:
+        if not pad:
+            h, w = min(H, h), min(W, w)
+            template = template[:h, :w]
 
+        corr_map = convolve2d(image, template, mode="same" if pad else "valid")
+    # Compute means and standard deviations for normalization
+    else:
+        
+        # clip it down        
+        if pad:
+            image = np.pad(image, ((0, h), (0, w)))
+        else:
+            h, w = min(H, h), min(W, w)
+            template = template[:h, :w]
+
+        # Extract all windows of the size of template from the image
+        windows = sliding_window_view(image, (h, w))  # shape: (H-h+1, W-w+1, h, w)
+
+        if unnormalized is False:
+            template_mean = template.mean()
+            template_std = template.std()
+
+            # Compute window means and standard deviations along the last two axes (the window dimensions)
+            windows_mean = windows.mean(axis=(-1, -2))
+            windows_std = windows.std(axis=(-1, -2))
+
+            # Normalize windows and template
+            norm_windows = (windows - windows_mean[..., None, None])
+            norm_template = template - template_mean
+
+            # Compute cross correlation (summing the product over window dimensions)
+            numerator = np.sum(norm_windows * norm_template, axis=(-1, -2))
+            denominator = windows_std * template_std * h * w
+
+            corr_map = np.where(denominator == 0, 0, numerator / denominator)
+        else:
+            corr_map = np.sum(windows * template, axis=(-1, -2))
+
+    # find the highest score
+    high_score = corr_map.max() 
+    pos = corr_map.argmax()
+
+    # find the best offset
+    pos = np.array(np.unravel_index(pos, corr_map.shape))
+
+    # adjust position if the image was swapped    
+
+    return corr_map, high_score, pos * (1 if swap else -1)
+
+def patch_matching_sqdiff(image, template, pad=False):
+
+    swap =  image.size >= template.size
+    # determine the larger image
+    image, template = (image, template) if swap else (template, image)
+    
+    # pad the image by the size of the template to allow finding negative offsets
     H, W = image.shape
     h, w = template.shape
 
-    # clip it down
-    h, w = min(H, h), min(W, w)
-    template = template[:h, :w]
+    if pad:
+        # Pad the image on all sides by (h, w)
+        image = np.pad(image, ((0, h), (0, w)), mode='constant', constant_values=0)
+        # Update H, W after padding:
+        H, W = image.shape
+    else:
+        h, w = min(H, h), min(W, w)
+        template = template[:h, :w]
 
-    # Extract all windows of the size of template from the image
-    windows = sliding_window_view(image, (h, w))  # shape: (H-h+1, W-w+1, h, w)
+    print(template.shape, image.shape)
+        
+    # Extract all sliding windows of size (h, w) from the image.
+    windows = sliding_window_view(image, (h, w))
+    # windows shape is (H-h+1, W-w+1, h, w)
+    
+    # Compute the squared differences for each window.
+    diff = windows - template  # broadcasting: template shape (h, w) is broadcasted over the windows.
+    sqdiff = diff ** 2
+    
+    # Sum the squared differences over the last two axes (the window dimensions)
+    result = -sqdiff.sum(axis=(-1, -2))
+    
+    # find the highest score
+    high_score = result.max() 
+    pos = result.argmax()
 
-    # Compute means and standard deviations for normalization
-    template_mean = template.mean()
-    template_std = template.std()
+    # find the best offset
+    pos = np.array(np.unravel_index(pos, result.shape))
 
-    # Compute window means and standard deviations along the last two axes (the window dimensions)
-    windows_mean = windows.mean(axis=(-1, -2))
-    windows_std = windows.std(axis=(-1, -2))
+    # adjust position if the image was swapped    
+    return result, high_score, pos * (1 if swap else -1)
 
-    # Normalize windows and template
-    norm_windows = (windows - windows_mean[..., None, None])
-    norm_template = template - template_mean
-
-    # Compute cross correlation (summing the product over window dimensions)
-    numerator = np.sum(norm_windows * norm_template, axis=(-1, -2))
-    denominator = windows_std * template_std * h * w
-
-    # Avoid division by zero
-    corr_map = np.where(denominator == 0, 0, numerator / denominator)
-    return corr_map, not swap
 
 def calculate_optical_flow(frame1, frame2):
     # Convert to grayscale, as optical flow methods usually work on single channel images
