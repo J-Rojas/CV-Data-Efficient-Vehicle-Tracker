@@ -219,8 +219,8 @@ class Tracker():
                         if k == key:
                             continue
                         # determine the cross correlation for the top-left and bottom-right corners and get the padding for this frame
-                        scores_tl.append(self.best_scores(patch_matching_cross_correlation(ref, im, use_convolve=False)))
-                        scores_br.append(self.best_scores(patch_matching_cross_correlation(ref_flipped, np.flip(im, axis=(0, 1)), use_convolve=False)))
+                        scores_tl.append(self.best_scores(patch_matching_cross_correlation(ref, im)))
+                        scores_br.append(self.best_scores(patch_matching_cross_correlation(ref_flipped, np.flip(im, axis=(0, 1)))))
                     
                     # filter scores, padding only, not considering "growing" by using negative values
                     #print(scores_tl)
