@@ -624,6 +624,7 @@ if __name__ == '__main__':
             15, size)
 
     ious = []
+    tracked_ious = []
     for (idx_row, row), im_path in zip(labels.iterrows(), image_paths):
 
         im = cv2.imread(im_path)
@@ -643,15 +644,19 @@ if __name__ == '__main__':
             y1, x1, y2, x2 = bbox            
             cv2.putText(im, str(0), (x1, y2), cv2.FONT_HERSHEY_PLAIN, 1.0, (255, 255, 0))
             cv2.rectangle(im, (x1, y1), (x2, y2), color=(0, 0, 255), thickness=2)            
-        
+        else:            
+            ious.append(0)
+
+
         if corr_bbox is not None:
             corr_bbox = rescale_bboxes(tracker.detector.IMAGE_OUTPUT_SIZE, OUTPUT_SIZE, np.array([corr_bbox]))[0]        
             y1, x1, y2, x2 = corr_bbox                
             cv2.rectangle(im, (x1, y1), (x2, y2), color=(255, 0, 0), thickness=2)
+            tracked_ious.append(iou(label_bbox, corr_bbox))
+        else:
+            tracked_ious.append(0)
 
-        if corr_bbox is None and bbox is None:
-            ious.append(0)
-
+        
         cv2.imwrite(f"./tracking/tracks/frame_{idx_row}.jpg", im)
         video_out.write(im)
 
@@ -659,5 +664,7 @@ if __name__ == '__main__':
         video_out.release()
 
 
-    print("Mean IoU: ", np.mean(ious))
+    print("Mean Detections IoU: ", np.mean(ious))
+    print("Mean Tracked IoU: ", np.mean(tracked_ious))
+
 
