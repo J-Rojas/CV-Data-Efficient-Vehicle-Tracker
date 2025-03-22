@@ -498,3 +498,42 @@ def rescale_bboxes(src_shape, target_shape, bboxes):
     bboxes_trans = np.array([np.matmul(scale_matrix, bbox.reshape(2, 2).T).T.reshape(4) for bbox in bboxes]).astype(int)
     
     return bboxes_trans
+
+def find_best_correspondence(image, template, use_pad=False):
+    
+    # find the best fit by using the four corners - this is an alternative to using cross correlation with padding, which can be much slower
+    corner_results = [
+        patch_matching_cross_correlation(image, template, pad=use_pad, unnormalized=False)[1:], #tl
+        patch_matching_cross_correlation(np.flip(image, axis=(0)), np.flip(template, axis=(0)), pad=use_pad, unnormalized=False)[1:], # bl
+        patch_matching_cross_correlation(np.flip(image, axis=(1)), np.flip(template, axis=(1)), pad=use_pad, unnormalized=False)[1:], # tr
+        patch_matching_cross_correlation(np.flip(image, axis=(0, 1)), np.flip(template, axis=(0, 1)), pad=use_pad, unnormalized=False)[1:], #br
+    ]
+
+    high_scores = list(map(lambda x: x[0], corner_results))
+    idx = np.argmax(high_scores)
+    pos = corner_results[idx][1]
+    max_score = corner_results[idx][0]            
+
+    # bottom right
+    tl_ref = np.array([image.shape[0], 0])
+    tl_ref_bl = tl_ref - np.min([[image.shape[0], 0], [template.shape[1], 0]], axis=0)
+    shift_from_bl = tl_ref_bl - pos * [1, -1]
+    
+    # top right
+    tl_ref = np.array([0, image.shape[1]])
+    tl_ref_tr = tl_ref - np.min([[0, image.shape[1]], [0, template.shape[1]]], axis=0)
+    shift_from_tr = tl_ref_tr - pos * [-1, 1]
+
+    # bottom right
+    tl_ref = np.array(image.shape)
+    tl_ref_br = tl_ref - np.min([[image.shape[0], image.shape[1]], [template.shape[0], template.shape[1]]], axis=0)
+    shift_from_br = tl_ref_br - pos
+
+    return high_scores, [
+        pos,
+        shift_from_bl,
+        shift_from_tr,
+        shift_from_br
+    ]
+
+    

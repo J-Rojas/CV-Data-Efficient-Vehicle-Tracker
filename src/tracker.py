@@ -6,7 +6,7 @@ import json
 import pandas as pd
 from numpy.lib.stride_tricks import sliding_window_view
 from .detector import SegmentationLightning
-from .tools import slice_from_bbox, patch_matching_cross_correlation, iou, rescale_bboxes, torch_to_cv2_image, overlay_mask_on_image, size_from_bbox
+from .tools import slice_from_bbox, patch_matching_cross_correlation, find_best_correspondence, iou, rescale_bboxes, torch_to_cv2_image, overlay_mask_on_image, size_from_bbox
 from skimage import measure
 from bisect import bisect_left
 from typing import Tuple
@@ -152,10 +152,29 @@ class TrackingObject():
         pixels = self.get_containing_pixels(target_frame)        
         return self.compare(reference_frame, pixels, use_containing_region=True)[1] if pixels is not None else (0, 0)
 
+    def find_best_fit(self, reference_frame, target_frame):
+        template = self.get_containing_pixels(target_frame)
+        image = self.get_containing_pixels(reference_frame)
+
+        # use padding only if the sizes are very different for performance
+        diff = np.abs(np.array(image.shape) - np.array(template.shape))
+        
+        use_pad = np.sum(np.max(diff, axis=0) / np.max(image.shape, axis=0) > 0.25) > 0
+
+        results = find_best_correspondence(image, template, use_pad=use_pad)
+
+        high_scores = results[0]
+        idx = np.argmax(high_scores)
+            
+        return results[1][idx]
+
+
+
 class Tracker():
 
     SIMILARITY_THRESHOLD = 0.2
     SLIDING_WINDOW_SIZE = 3
+    FILTER_SLIDING_WINDOW_SIZE = 5
     REGION_FILTER_WINDOW_SIZE = 5
     REGION_FILTER_THRESHOLD = 0.8
     REGION_MIN_DIMENSION = 15
@@ -386,15 +405,19 @@ class Tracker():
 
         # calculate the gradient of the sizes
         diff_1st = np.diff(sizes, 1, axis=0)
+
+        # pad by 1 to avoid removing the last frame on differencing
+        diff_1st = np.pad(diff_1st, ((0, 1), (0, 0)))
+
         #diff_2nd = np.diff(sizes, 2, axis=0)
         filtered_diff = np.apply_along_axis(lambda x: np.convolve(x, conv_filter, mode="same"), 1, diff_1st)
 
         # use the frames where the sizes are stable
         valid_items = np.where(
-            (np.abs(filtered_diff[:,0]) < sizes[1:,0] * 0.1) & (np.abs(filtered_diff[:,1]) < sizes[1:,1] * 0.1)            
+            (np.abs(filtered_diff[:,0]) < sizes[:,0] * 0.1) & (np.abs(filtered_diff[:,1]) < sizes[:,1] * 0.1)            
         )[0]
         invalid_items = np.where(
-            (np.abs(filtered_diff[:,0]) >= sizes[1:,0] * 0.1) | (np.abs(filtered_diff[:,1]) >= sizes[1:,1] * 0.1)            
+            (np.abs(filtered_diff[:,0]) >= sizes[:,0] * 0.1) | (np.abs(filtered_diff[:,1]) >= sizes[:,1] * 0.1)            
         )[0]
 
         print(valid_items)
@@ -463,25 +486,28 @@ class Tracker():
                 # search for closest keyframe
                 keyframe_idx = bisect_left(keyframes_nums, idx)                
                 keyframe_prev = keyframes_nums[max(0, keyframe_idx - 1)]
-                #keyframe_next = keyframes_nums[keyframe_idx]
+                keyframe_next = keyframes_nums[min(len(keyframes_nums) - 1, keyframe_idx)]
                 keyframe = keyframe_prev #if abs(keyframe_prev - idx) <= abs(keyframe_next - idx) else keyframe_next                
                 
                 bbox = obj.get_containing_region(idx)
                 bboxes[idx] = bbox
 
-                # find a representative region in the keyframe
-                #bbox = obj.get_containing_region(keyframe)
-                (y_off, x_off) = obj.region_offset(keyframe, idx)
-                print(f"key {idx}, ", bbox)
-                print(idx, keyframe, y_off, x_off, sizes_mean_kf[idx - min_frame, 0], sizes_mean_kf[idx - min_frame, 1])
-                # reposition and apply the mean width and height
-                cor_bboxes[idx] = (int(bbox[0] - y_off), int(bbox[1] - x_off), int(bbox[0] - y_off + sizes_mean_kf[idx - min_frame, 0]), int(bbox[1] - x_off + sizes_mean_kf[idx - min_frame, 1]))                                    
+                if idx != keyframe_next:
+                    # find a representative region in the keyframe
+                    #bbox = obj.get_containing_region(keyframe)
+                    (y_off, x_off) = obj.find_best_fit(keyframe, idx)
+                    print(f"key {idx}, ", bbox)
+                    print(idx, keyframe, y_off, x_off, sizes_mean_kf[idx - min_frame, 0], sizes_mean_kf[idx - min_frame, 1])
+                    # reposition and apply the mean width and height
+                    cor_bboxes[idx] = (int(bbox[0] - y_off), int(bbox[1] - x_off), int(bbox[0] - y_off + sizes_mean_kf[idx - min_frame, 0]), int(bbox[1] - x_off + sizes_mean_kf[idx - min_frame, 1]))                                    
+                else:
+                    cor_bboxes[idx] = bbox
             
             for idx in occluded_frames:
 
                 # no regions to compare, just make a best estimate            
-                prev = obj.get_containing_region(idx - 1)
-                next = obj.get_containing_region(idx + 1)
+                prev = cor_bboxes.get(idx)
+                next = cor_bboxes.get(idx + 1)
 
                 if next is None:
                     next = prev
@@ -494,7 +520,23 @@ class Tracker():
                 bbox = np.stack([prev, next]).mean(axis=0).astype(np.int32)
 
                 # interpolate the tracking position
-                #cor_bboxes[idx] = bbox
+                cor_bboxes[idx] = bbox
+
+            # window average the correction boxes to fine tune the results
+            conv_filter = np.ones(self.FILTER_SLIDING_WINDOW_SIZE) / self.FILTER_SLIDING_WINDOW_SIZE 
+            sorted_keys = sorted(cor_bboxes.keys())
+            sorted_bboxes = np.array([ cor_bboxes[k] for k in sorted_keys])
+            sorted_bboxes = np.pad(sorted_bboxes, ((self.FILTER_SLIDING_WINDOW_SIZE // 2, self.FILTER_SLIDING_WINDOW_SIZE // 2 + 1), (0, 0)), mode='edge')
+            filtered_bboxes = np.apply_along_axis(lambda x: np.convolve(x, conv_filter, mode="same"), 0, sorted_bboxes)[self.FILTER_SLIDING_WINDOW_SIZE//2:-self.FILTER_SLIDING_WINDOW_SIZE//2]
+            
+            cor_bboxes = { k: boxes for k,boxes in zip(sorted_keys, filtered_bboxes.astype(np.int32)) }
+            # avoid averaging errors at the ends
+            if bboxes.get(sorted_keys[-1]):
+                cor_bboxes[sorted_keys[-1]] = bboxes[sorted_keys[-1]]
+            if bboxes.get(sorted_keys[0]):
+                cor_bboxes[sorted_keys[0]] = bboxes[sorted_keys[0]]
+
+            correction_bboxes[obj.num_id] = cor_bboxes
                 
         return tracking_bboxes, correction_bboxes
 
@@ -600,14 +642,14 @@ if __name__ == '__main__':
 
             y1, x1, y2, x2 = bbox            
             cv2.putText(im, str(0), (x1, y2), cv2.FONT_HERSHEY_PLAIN, 1.0, (255, 255, 0))
-            cv2.rectangle(im, (x1, y1), (x2, y2), color=(0, 0, 255), thickness=2)
+            cv2.rectangle(im, (x1, y1), (x2, y2), color=(0, 0, 255), thickness=2)            
+        
+        if corr_bbox is not None:
+            corr_bbox = rescale_bboxes(tracker.detector.IMAGE_OUTPUT_SIZE, OUTPUT_SIZE, np.array([corr_bbox]))[0]        
+            y1, x1, y2, x2 = corr_bbox                
+            cv2.rectangle(im, (x1, y1), (x2, y2), color=(255, 0, 0), thickness=2)
 
-            if corr_bbox is not None:
-                corr_bbox = rescale_bboxes(tracker.detector.IMAGE_OUTPUT_SIZE, OUTPUT_SIZE, np.array([corr_bbox]))[0]        
-                y1, x1, y2, x2 = corr_bbox                
-                cv2.rectangle(im, (x1, y1), (x2, y2), color=(255, 0, 0), thickness=2)
-            
-        else:
+        if corr_bbox is None and bbox is None:
             ious.append(0)
 
         cv2.imwrite(f"./tracking/tracks/frame_{idx_row}.jpg", im)
