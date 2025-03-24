@@ -3,14 +3,44 @@ import os
 import glob
 from typing import Any
 import numpy as np
+import cv2
 from PIL import Image, ImageDraw
 import torch
 from torch.utils.data import Dataset, DataLoader
 from .tools import create_fuzzy_label_rect, create_label_rect, calculate_optical_flow
-from .augment import generate_random_sequence
+from .augment import generate_random_sequence, merge_background_and_foreground_sequences, get_fixed_bg_params, get_fixed_fg_params, get_fixed_bg_params_none
 import torchvision.transforms as transforms
 import pandas as pd
 from transformers import SegformerFeatureExtractor
+
+def get_image_sequences(idx, image_paths, labels_paths):
+    images = []
+    labels = []
+    for i in range(idx - 1, idx + 2):
+        if 0 <= i < len(image_paths):
+            filename = image_paths[i]
+            filename_label = labels_paths[i]
+                        
+            # Load the image                
+            image = Image.open(filename).convert("RGB")
+
+            images.append(np.array(image))
+
+            # Load the label image                
+            image = Image.open(filename_label).convert("RGBA")                
+            image = np.array(image)
+            labels.append(image)
+        else:
+            images.append(None)
+            labels.append(None)
+
+    for i in range(len(images)):
+        if images[i] is None:
+            # generate an image with pure noise
+            images[i] = images[1].copy()
+            labels[i] = labels[1].copy()   
+
+    return images, labels
 
 class VehicleSegmentationDataset(Dataset):
     def __init__(self, data_dir, labels_dir, feature_extractor, ignore=True):
@@ -50,31 +80,7 @@ class VehicleSegmentationDataset(Dataset):
         
         # Merge the previous and current frames into one image vertically for input into the network
 
-        images = []
-        labels = []
-        for i in range(idx - 1, idx + 2):
-            if 0 <= i < len(self.image_paths):
-                filename = self.image_paths[i]
-                filename_label = self.labels_paths[i]
-                            
-                # Load the image                
-                image = Image.open(filename).convert("RGB")
-
-                images.append(np.array(image))
-
-                # Load the label image                
-                image = Image.open(filename_label).convert("RGBA")                
-                image = np.array(image)
-                labels.append(image)
-            else:
-                images.append(None)
-                labels.append(None)
-
-        for i in range(len(images)):
-            if images[i] is None:
-                # generate an image with pure noise
-                images[i] = images[1].copy()
-                labels[i] = labels[1].copy()            
+        images, labels = get_image_sequences(idx, self.image_paths, self.labels_paths)
 
         pad_width = ((0, 0), (0, 0), (0, 1))        
         
@@ -142,23 +148,32 @@ class VehicleSegmentationAugmentedDataset(Dataset):
         ])
         self.num_items = num_items
         self.sequence_range = [16, 16]        
+
+        labels_boxes = pd.read_csv("data/groundtruth.txt", header=None)
+        self.boxes = [(row[3], row[2], row[7], row[6]) for idx, row in labels_boxes.iterrows()]
     
     def __len__(self):
         return self.num_items
     
     def __getitem__(self, idx):
 
-        images, image_labels, bboxes = generate_random_sequence(self.fg_image_paths, self.bg_image_paths, length=[self.sequence_range, self.sequence_range])
+        fg_trans = get_fixed_fg_params()
+        bg_trans = get_fixed_bg_params()
+
+        selected_bg, selected_fg, start_positions, theta = generate_random_sequence(self.fg_image_paths, self.bg_image_paths, self.boxes, length=3, position_range=[0, 0.5])
+        images, image_labels, bboxes = merge_background_and_foreground_sequences(selected_bg, selected_fg, start_positions, theta, fg_trans, bg_trans)
+        pixels, mask, bboxes_trans = self._prepare_output_data(images, image_labels, bboxes)
         
+        return {"pixel_values": pixels, "labels": mask, "boxes": bboxes_trans }
+
+    def _prepare_output_data(self, images, image_labels, bboxes, shift_labels=True):
         # stack 2nd, 1st images
         image_input: NDArray[Any] = np.concatenate([images[0], images[1]], axis=0)
         # stack 2nd and 3rd labels
         label_input = np.concatenate([image_labels[2], image_labels[1]], axis=0)
-        # reposition bboxes for merge
-        bboxes[0] = np.array([bboxes[0][0] + images[0].shape[0], bboxes[0][1], bboxes[0][2] + images[0].shape[0], bboxes[0][3]])
+            
+        pixels = self.feature_extractor(images=image_input, return_tensors="pt")["pixel_values"].squeeze(0)
         
-        pixels = feature_extractor(images=image_input, return_tensors="pt")["pixel_values"].squeeze(0)                  
-
         # replace top
         pad_width = ((0, 0), (0, 0), (0, 1))  
         height_half = pixels.shape[1] // 2
@@ -182,19 +197,95 @@ class VehicleSegmentationAugmentedDataset(Dataset):
         # recalculate bboxes after image rescaling
         scale_matrix = np.array([[scale_y, 0.0], [0.0, scale_x]])
         
-
+        # reposition bboxes for merge
+        if shift_labels:
+            bboxes[0] = np.array([bboxes[0][0] + images[0].shape[0], bboxes[0][1], bboxes[0][2] + images[0].shape[0], bboxes[0][3]])
         #print("scale", scale_matrix)
         #print("bboxes before", bboxes)
-        bboxes_trans = np.array([np.matmul(scale_matrix, bbox.reshape(2, 2).T).T.reshape(4) for bbox in bboxes]).astype(int)
+        bboxes_trans = torch.tensor(np.array([np.matmul(scale_matrix, bbox.reshape(2, 2).T).T.reshape(4) for bbox in bboxes]).astype(int))
         #print("bboxes", bboxes_trans)
-
-        
         #print(bboxes_trans)
 
         # only use the alpha channel to determine the mask
         mask = pixels_label[3,:,:]
 
-        return {"pixel_values": pixels, "labels": mask, "boxes": bboxes_trans}
+        return pixels, mask, bboxes_trans
+
+    
+
+class VehicleSegmentationAugmentedEvaluationDataset(VehicleSegmentationAugmentedDataset):
+
+    def __init__(self, validation_dir, data_dir, feature_extractor, num_vehicles=1):
+        """
+        Args:
+            data_dir (str): Path to the folder containing input images.            
+            transform (callable, optional): Transformation to apply to the input images.
+            mask_transform (callable, optional): Transformation to apply to the masks.
+        """
+        super().__init__(data_dir, feature_extractor, ignore=False)
+        self.bg_image_paths = sorted(glob.glob(os.path.join(validation_dir, "*.jpg")))        
+        self.num_vehicles = num_vehicles        
+        self.vehicle_data = [{
+           "sequence_data": generate_random_sequence(
+                self.fg_image_paths, 
+                self.bg_image_paths,
+                self.boxes,
+                length=len(self.bg_image_paths),
+                position_range=[[0, 1.0], [0, 0.75]],
+                velocity_range=[0.0,0.2],
+                velocity_noise=[0.005,0.01],
+                direction_range=[45, 120]                              
+            ),
+            "fg_trans": get_fixed_fg_params()
+        } for i in range(1, num_vehicles)] 
+        self.labels_df = pd.read_csv("data/groundtruth.txt", header=None)
+    
+
+    def __len__(self):
+        return len(self.bg_image_paths)
+
+    def __getitem__(self, idx):
+
+        max_bg = len(self.bg_image_paths)
+
+        images, image_labels = get_image_sequences(idx, self.bg_image_paths, self.labels_paths)
+        label_bboxes = [[(row[3], row[2], row[7], row[6]) for idx, row in self.labels_df[max(0, idx-1):min(max_bg, idx+2)].iterrows() ]]
+
+        # pad the sequence when we are at the ends
+        if idx == 0:
+            label_bboxes[0].insert(0, label_bboxes[0][0])
+        elif idx == max_bg - 1:
+            label_bboxes[0].append(label_bboxes[0][-1])
+
+        if self.num_vehicles > 1:
+
+            for data in self.vehicle_data:
+                fg_trans_params = data["fg_trans"]
+                seq_data = data["sequence_data"]
+
+                # get the slices of data for this portion of the sequence, but we use the fixed background images that were already generated
+                selected_bg, selected_fg, positions, theta = seq_data
+                selected_bg, selected_fg_partial, positions_partial = images, selected_fg[max(0, idx-1):min(max_bg, idx + 2)], positions[max(0, idx-1):min(max_bg, idx + 2)]
+
+                # pad the sequence when we are at the ends
+                if idx == 0:
+                    selected_fg_partial.insert(0, selected_fg[0])
+                    positions_partial.insert(0, positions[0])
+                elif idx == max_bg - 1:
+                    selected_fg_partial.append(selected_fg[-1])
+                    positions_partial.append(positions[-1])
+
+                # generate new vehicles into the scene, using the preloaded images with the original vehicle as backgrounds
+                images, image_labels, bboxes = merge_background_and_foreground_sequences(selected_bg, selected_fg_partial, positions_partial, theta, fg_trans_params=fg_trans_params, bg_trans_params=get_fixed_bg_params_none())
+
+                # append the boxes to the list that contains the boxes for each vehicle
+                label_bboxes.append(bboxes)
+                
+        all_vehicle_bboxes = np.array(label_bboxes)
+
+        pixels, mask, trans_bboxes = self._prepare_output_data(images, image_labels, all_vehicle_bboxes.reshape(-1, 4), shift_labels=False )
+        
+        return {"pixel_values": pixels, "labels": mask, "boxes": trans_bboxes.reshape(self.num_vehicles, -1, 4) }
 
 
 # Paths to your data directories
@@ -222,11 +313,12 @@ val_dataset = VehicleSegmentationDataset(
     labels_dir=labels_dir,
     feature_extractor=feature_extractor
 )
-eval_dataset = VehicleSegmentationDataset(
-    data_dir=validation_images_dir,
-    labels_dir=labels_dir,
+
+eval_dataset = VehicleSegmentationAugmentedEvaluationDataset(
+    validation_dir=validation_images_dir,
+    data_dir=labels_dir,
     feature_extractor=feature_extractor,
-    ignore=False
+    num_vehicles=1
 )
 
 #eval_dataset = VehicleSegmentationAugmentedDataset(

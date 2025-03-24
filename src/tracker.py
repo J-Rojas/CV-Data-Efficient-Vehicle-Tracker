@@ -2,16 +2,22 @@ from src.detector import SegmentationLightning
 import numpy as np
 import cv2
 import torch
-import json
+import os.path    
+import glob
 import pandas as pd
+import argparse    
 from numpy.lib.stride_tricks import sliding_window_view
 from .detector import SegmentationLightning
 from .tools import slice_from_bbox, patch_matching_cross_correlation, find_best_correspondence, iou, rescale_bboxes, torch_to_cv2_image, overlay_mask_on_image, size_from_bbox
 from skimage import measure
 from bisect import bisect_left
 from typing import Tuple
-from .loader import eval_loader
+from .loader import VehicleSegmentationAugmentedEvaluationDataset, DataLoader, validation_images_dir, labels_dir, feature_extractor
 
+OUTPUT_SIZE = [272, 640]
+OUTPUT_SIZE_CV = [640, 272]
+
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 def convert_image(normalized_img):
     
@@ -38,18 +44,21 @@ class TrackingObject():
         self.num_id = id
         self.frame_pixels = {}
         self.regions = {}
+        self.pred_mask = {}
 
     def to_json(self):
         return {
             "num_id": self.num_id,
             "frame_pixels": self.frame_pixels,
-            "regions": self.regions
+            "regions": self.regions,
+            "pred_mask": self.pred_mask
         }
 
     def from_json(self, data):
         self.num_id = data["num_id"]
         self.frame_pixels = data["frame_pixels"]
         self.regions = data["regions"]
+        self.pred_mask = data["pred_mask"]
 
     def best_scores(self, scores):
         return scores[1:]
@@ -93,15 +102,20 @@ class TrackingObject():
         return np.mean([iou(bbox, box) for box in boxes]) if boxes else 0.
 
 
-    def update(self, idx, pixels, region):
+    def update(self, idx, pixels, region, pred_mask=None):
         fp = self.frame_pixels[idx] = self.frame_pixels.get(idx, [])
         re = self.regions[idx] = self.regions.get(idx, [])
+        pd = self.pred_mask[idx] = self.pred_mask.get(idx, [])        
         fp.append(pixels)
         re.append(region)
+        if pred_mask is not None:
+            assert(pred_mask.shape == size_from_bbox(region))
+            pd.append(pred_mask)
 
     def clear(self, idx):
         self.frame_pixels[idx] = []
         self.regions[idx] = []
+        self.pred_mask[idx] = []
 
     def get_pos_as_array(self):
         min_idx = min(self.regions.keys())
@@ -120,8 +134,7 @@ class TrackingObject():
         max_region = region_arr.max(axis=0)
         return [min_region[0], min_region[1], max_region[2],  max_region[3]]
 
-    def get_containing_pixels(self, idx):
-        pixels_list = self.frame_pixels.get(idx)
+    def _merge_pixel_regions(self, idx, pixels_list):        
         if pixels_list is None:
             return None
         # if there is only one region, then return 
@@ -136,8 +149,16 @@ class TrackingObject():
             # merge pixel regions
             for r, p in zip(region_list, pixels_list):
                 pixels[r[0] - region[0]:r[2] - region[0] + 1,r[1] - region[1]:r[3] - region[1] + 1] = p
+
+        assert(pixels.shape == size_from_bbox(region))
         return pixels
 
+    def get_containing_pixels(self, idx):
+        return self._merge_pixel_regions(idx, self.frame_pixels.get(idx))
+
+    def get_containing_mask(self, idx):
+        return self._merge_pixel_regions(idx, self.pred_mask.get(idx))
+        
     def get_sizes_as_array(self, idxes=None):        
         arr = np.zeros((len(self.regions), 2))
         for i, region_list in enumerate(self.regions.values()):
@@ -198,7 +219,7 @@ class Tracker():
 
     def get_detection_masks(self, im):
         im, preds, logits, loss = self.detector.evaluate(im)
-        return im, preds.detach().numpy(), logits, loss
+        return im, preds.detach().cpu().numpy(), logits, loss
 
     def best_scores(self, scores):        
         return scores[1:]
@@ -216,6 +237,7 @@ class Tracker():
                 # copy any necesary information here
                 region_maps = {key: obj.get_containing_region(key) for key in obj.regions.keys()}
                 pixel_maps = {key: obj.get_containing_pixels(key) for key in obj.frame_pixels.keys()}
+                mask_maps = {key: obj.get_containing_mask(key) for key in obj.pred_mask.keys()}
 
                 for key in obj.frame_pixels.keys():
                     
@@ -224,8 +246,9 @@ class Tracker():
                     pixel_regions = list(filter(lambda x: x is not None, [pixel_maps.get(r, None) for r in keys]))
                     sizes = [size_from_bbox(r) for r in regions]
 
-                    ref = pixel_maps.get(key)
+                    ref = pixel_maps.get(key)                    
                     ref_flipped = np.flip(ref, axis=(0, 1))
+                    mask = mask_maps.get(key)
                     scores_tl = []
                     scores_br = []
                     region = region_maps.get(key)
@@ -261,9 +284,11 @@ class Tracker():
 
                     new_region = (region[0] + pad_tl[0], region[1] + pad_tl[1], region[2] - pad_br[0], region[3] - pad_br[1])
                     ref = ref[pad_tl[0]:ref.shape[0]-pad_br[0], pad_tl[1]:ref.shape[1]-pad_br[1]]
+                    mask = mask[pad_tl[0]:mask.shape[0]-pad_br[0], pad_tl[1]:mask.shape[1]-pad_br[1]]
+                    
 
                     obj.clear(key)
-                    obj.update(key, ref, new_region)
+                    obj.update(key, ref, new_region, mask)
 
         for obj in self.objects:
             for key in obj.frame_pixels.keys():
@@ -291,7 +316,12 @@ class Tracker():
             s = slice_from_bbox(region.bbox)
             
             bbox = region.bbox
+            # scikit bbox are half open, while our bboxes are fully closed, adjust them
+            bbox = (bbox[0], bbox[1], bbox[2] - 1, bbox[3] - 1)
+            
+
             region_pixels = im[:, bbox[0]:bbox[2]+1, bbox[1]:bbox[3]+1].mean(axis=0)
+            pred_mask = preds[slice_from_bbox(bbox)]
             #assert(region_pixels.shape == size_from_bbox(region.bbox))
             #norm_im = convert_image(region_pixels)
             
@@ -322,7 +352,7 @@ class Tracker():
                 tracking_object = TrackingObject(id)
                 self.objects.append(tracking_object)
 
-            tracking_object.update(idx, region_pixels, region.bbox)
+            tracking_object.update(idx, region_pixels, bbox, pred_mask)
 
     def log_active_tracks(self, idx):
         print(f"Active tracks for idx {idx}:")
@@ -338,7 +368,7 @@ class Tracker():
         
         for idx, image in enumerate(im):
             mask = pred_mask[idx]
-            self.determine_objects_from_masks(offset + idx, image.detach().numpy(), mask)
+            self.determine_objects_from_masks(offset + idx, image.detach().cpu().numpy(), mask)
             self.log_active_tracks(offset + idx)
         
         return im, pred_mask, logits, loss
@@ -457,10 +487,32 @@ class Tracker():
 
         return self.find_good_keyframes_interp(obj)
 
+    def find_matching_by_bounding_box(self, idx, bboxes):
+        
+        iou_scores = []
+
+        for obj in self.objects:
+            iou_scores.append([obj.overlaps(idx, box) for box in bboxes])
+                        
+        # find object correspondences by best IoU scores
+        iou_scores = np.array(iou_scores)
+        keys = [ obj.num_id for obj in self.objects]
+        mapping = {}
+        
+        remaining_obj_idx = list(range(len(keys)))
+
+        for i in range(len(bboxes)):
+            sorted_scores_idx = np.argsort(iou_scores[:, i])
+            obj_idx = sorted_scores_idx[remaining_obj_idx][-1]
+            mapping[keys[obj_idx]] = i
+            try:
+                remaining_obj_idx.remove(obj_idx)
+            except ValueError as e:
+                pass
+            
+        return mapping
 
     def determine_tracking_trajectories(self) -> tuple[dict[int, dict[int, tuple]], dict[int, dict[int, tuple]]]:
-
-        
 
         tracking_bboxes = {}
         correction_bboxes = {}
@@ -540,11 +592,12 @@ class Tracker():
                 
         return tracking_bboxes, correction_bboxes
 
-def generate_tracks(tracker):
+def generate_tracks(tracker, loader, on_progress=None):
     offset = 0
-    for batch in eval_loader:
+    num_batches = len(loader)
+    for batch_index, batch in enumerate(loader):
         
-        pixel_values = batch["pixel_values"]
+        pixel_values = batch["pixel_values"].to(DEVICE)
         pixel_values, pred_mask, logits, loss = tracker.track(offset, pixel_values)
 
         pred_probs = torch.softmax(logits, dim=1)[:,1]
@@ -570,101 +623,163 @@ def generate_tracks(tracker):
 
             cv2.imwrite(f"./tracking/regions/frame_{offset + i}.jpg", im)
         
+        if on_progress:
+            on_progress("Generating detections...",float(batch_index)/num_batches)
 
         offset += len(pixel_values)
 
-if __name__ == '__main__':
-    
-    import argparse
-    import os.path
-    import pandas as pd
-    import glob
+def is_box_visible(tracker, bbox):
+    return (tracker.detector.IMAGE_OUTPUT_SIZE[0] > bbox[0]+bbox[2] >= 0 or tracker.detector.IMAGE_OUTPUT_SIZE[0] > bbox[0] >= 0) and \
+           (tracker.detector.IMAGE_OUTPUT_SIZE[1] > bbox[1]+bbox[3] >= 0 or tracker.detector.IMAGE_OUTPUT_SIZE[1] > bbox[1] >= 0)
 
-    OUTPUT_SIZE = [272, 640]
-    OUTPUT_SIZE_CV = [640, 272]
-
-    # load the model
-    argparser = argparse.ArgumentParser()
-    argparser.add_argument("--checkpoint_path", default="./checkpoints/last.ckpt", required=False)
-    argparser.add_argument("--load", default="./regions.pth", required=False)
-    
-    args = argparser.parse_args()
+def do_tracking_evaluation(args):
 
     # create paths
     os.makedirs("./tracking/regions", exist_ok=True)
     os.makedirs("./tracking/tracks", exist_ok=True)
 
-    model: SegmentationLightning = SegmentationLightning.load_from_checkpoint(args.checkpoint_path)
+    enable_segmentation = args.enable_segmentation
+    enable_smooth_tracking = args.enable_smooth_tracking
+    enable_detection_tracking = args.enable_detection_tracking
+    on_progress = None
+    if "progress_callback" in args:
+        on_progress = args.progress_callback
+    
+    model: SegmentationLightning = SegmentationLightning.load_from_checkpoint(args.checkpoint_path).to(DEVICE)
     model.eval()
     
     tracker = Tracker(model)
 
-    if not os.path.exists(args.load):
+    eval_dataset = VehicleSegmentationAugmentedEvaluationDataset(
+        validation_dir=validation_images_dir,
+        data_dir=labels_dir,
+        feature_extractor=feature_extractor,
+        num_vehicles=args.num_vehicles
+    )
+    eval_dataloader = DataLoader(eval_dataset, batch_size=8, shuffle=False, num_workers=4)
+    
+    if not os.path.exists(args.load) or args.num_vehicles > 1:
 
-        generate_tracks(tracker)
+        generate_tracks(tracker, eval_dataloader, on_progress)
         
         # write output
-        torch.save(tracker.to_json(), args.load)
+        if args.num_vehicles == 1:
+            torch.save(tracker.to_json(), args.load)
 
     else:
         tracker.from_json(torch.load(args.load))
 
     # as a post processing step, filter all of the detections through the sequence to improve the tracking results
     tracker.filter_detection_masks()
-
+    
+    if on_progress:
+        on_progress("Generating object tracking trajectories", 1.0)
     tracking_bboxes, corrections = tracker.determine_tracking_trajectories()
-
-    # calculate an IoU metric
-    labels = pd.read_csv("./data/groundtruth.txt", header=None)
-    image_paths = glob.glob("./data/*.jpg")
     
     size = OUTPUT_SIZE_CV
+    orig_size = tracker.detector.IMAGE_OUTPUT_SIZE
     video_out = cv2.VideoWriter("output_video.mp4",
             cv2.VideoWriter_fourcc(*'mp4v'),
             15, size)
 
     ious = []
     tracked_ious = []
-    for (idx_row, row), im_path in zip(labels.iterrows(), image_paths):
+    
+    idx = 0
+    for batch_idx, data in enumerate(eval_dataloader):
 
-        im = cv2.imread(im_path)
-
-        idx_row = int(idx_row)
-        label_bbox = (row[3], row[2], row[7], row[6])
+        images = data["pixel_values"]
+        boxes = data["boxes"]
         
-        bbox = tracking_bboxes[0].get(idx_row, None)
-        corr_bbox = corrections[0].get(idx_row, None)
-
+        for im, boxes in zip(images, boxes):
         
-        if bbox is not None:
-            # rescale bbox
-            bbox = rescale_bboxes(tracker.detector.IMAGE_OUTPUT_SIZE, OUTPUT_SIZE, np.array([bbox]))[0]        
-            ious.append(iou(label_bbox, bbox))
+            # use the lower half of the images with the current frame color values, convert to CV format
+            im = im[:,tracker.detector.IMAGE_OUTPUT_SIZE[0]:,:]
+            im = torch_to_cv2_image(im.detach(), denormalize=True)
+            # grab the boxes for the current frame 
+            boxes = boxes[:,0,:]
 
-            y1, x1, y2, x2 = bbox            
-            cv2.putText(im, str(0), (x1, y2), cv2.FONT_HERSHEY_PLAIN, 1.0, (255, 255, 0))
-            cv2.rectangle(im, (x1, y1), (x2, y2), color=(0, 0, 255), thickness=2)            
-        else:            
-            ious.append(0)
+            bbox_mapping = tracker.find_matching_by_bounding_box(idx, boxes)
+            is_visible = [is_box_visible(tracker, bbox) for bbox in boxes]
+            
+            for obj_idx in tracking_bboxes.keys():
+                
+                bbox = tracking_bboxes[obj_idx].get(idx, None)
+                corr_bbox = corrections[obj_idx].get(idx, None)
 
+                # find the associated bbox for this object from the box mapping
+                expected_bbox_idx = bbox_mapping.get(obj_idx)
 
-        if corr_bbox is not None:
-            corr_bbox = rescale_bboxes(tracker.detector.IMAGE_OUTPUT_SIZE, OUTPUT_SIZE, np.array([corr_bbox]))[0]        
-            y1, x1, y2, x2 = corr_bbox                
-            cv2.rectangle(im, (x1, y1), (x2, y2), color=(255, 0, 0), thickness=2)
-            tracked_ious.append(iou(label_bbox, corr_bbox))
-        else:
-            tracked_ious.append(0)
+                obj = tracker.objects[obj_idx]
+                
+                if bbox is not None:                
+                    if enable_segmentation:
+                        pred_mask = obj.get_containing_mask(idx).astype(np.uint8)
+                        pred_mask = np.pad(pred_mask, ((bbox[0], orig_size[0] - bbox[2] - 1), (bbox[1], orig_size[1] - bbox[3] - 1) ))                                                
+                        im = overlay_mask_on_image(im, pred_mask, color=(255, 0, 255), alpha=0.75)                    
 
-        
-        cv2.imwrite(f"./tracking/tracks/frame_{idx_row}.jpg", im)
-        video_out.write(im)
+                    if enable_detection_tracking:
+                        y1, x1, y2, x2 = bbox            
+                        cv2.putText(im, str(obj.num_id), (x1, y2), cv2.FONT_HERSHEY_PLAIN, 1.0, (255, 255, 0))
+                        cv2.rectangle(im, (x1, y1), (x2, y2), color=(0, 0, 255), thickness=2)            
+                
+
+                
+                if expected_bbox_idx != None and is_visible[expected_bbox_idx]:
+                    if bbox is not None:
+                        ious.append(iou(boxes[expected_bbox_idx], bbox))
+                    else:
+                        ious.append(0)
+                
+                
+                if corr_bbox is not None:                
+                    if enable_smooth_tracking:                
+                        y1, x1, y2, x2 = corr_bbox                
+                        cv2.rectangle(im, (x1, y1), (x2, y2), color=(255, 0, 0), thickness=2)            
+                
+                if expected_bbox_idx != None and is_visible[expected_bbox_idx]:
+                    if corr_bbox is not None:
+                        tracked_ious.append(iou(boxes[expected_bbox_idx], corr_bbox))
+                    else:
+                        tracked_ious.append(0)
+                
+
+            # rescale the image for output
+            rescaled_im = cv2.resize(im, size, interpolation=cv2.INTER_CUBIC)    
+
+            cv2.imwrite(f"./tracking/tracks/frame_{idx}.jpg", rescaled_im)
+            video_out.write(rescaled_im)
+
+            idx += 1
 
     if video_out:
         video_out.release()
 
+    return {
+        "mean_detection_iou": np.mean(ious),
+        "mean_tracked_iou": np.mean(tracked_ious),
+        "output_video_path": "./output_video.mp4"
+    }
 
-    print("Mean Detections IoU: ", np.mean(ious))
-    print("Mean Tracked IoU: ", np.mean(tracked_ious))
+    
 
+if __name__ == '__main__':
+    
+    # load the model
+    argparser = argparse.ArgumentParser()
+    argparser.add_argument("--checkpoint_path", default="./checkpoints/last.ckpt", required=False)
+    argparser.add_argument("--load", default="./regions.pth", required=False)
+    argparser.add_argument("--enable_smooth_tracking", default=False, action='store_true')
+    argparser.add_argument("--enable_detection_tracking", default=True, action='store_true')
+    argparser.add_argument("--enable_segmentation", default=False, action='store_true')
+    argparser.add_argument("--num_vehicles", default=1, type=int)
+    
+    args = argparser.parse_args()
 
+    if not os.path.exists(args.checkpoint_path):
+        raise Exception(f"Error: Model path '{args.checkpoint_path}' does not exist")
+
+    metrics = do_tracking_evaluation(args)
+    
+    print("Mean Detections IoU: ", np.mean(metrics["mean_detection_iou"]))
+    print("Mean Tracked IoU: ", np.mean(metrics["mean_tracked_iou"]))
