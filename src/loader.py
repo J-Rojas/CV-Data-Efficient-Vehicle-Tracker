@@ -42,7 +42,66 @@ def get_image_sequences(idx, image_paths, labels_paths):
 
     return images, labels
 
-class VehicleSegmentationDataset(Dataset):
+class VehicleDatasetBase(Dataset):
+
+    def __init__(self):
+        self.feature_extractor = feature_extractor
+        # For the masks, we need to use nearest neighbor interpolation to avoid label mixing.
+        self.mask_transform = transforms.Compose([
+            transforms.Resize((512, 512), interpolation=Image.NEAREST),
+            transforms.ToTensor(),
+        ])
+
+    def _prepare_output_data(self, images, image_labels=None, bboxes=None, shift_labels=True):
+        # stack 2nd, 1st images
+        image_input: NDArray[Any] = np.concatenate([images[0], images[1]], axis=0)
+        mask = None
+        # stack 2nd and 3rd labels
+        if image_labels is not None:
+            label_input = np.concatenate([image_labels[2], image_labels[1]], axis=0)
+            arr_uint8 = (np.clip(label_input, 0, 1) * 255).astype(np.uint8)
+            pixels_label = self.mask_transform(Image.fromarray(arr_uint8))
+
+            # only use the alpha channel to determine the mask
+            mask = pixels_label[3,:,:]
+            
+        pixels = self.feature_extractor(images=image_input, return_tensors="pt")["pixel_values"].squeeze(0)
+
+        # replace top
+        pad_width = ((0, 0), (0, 0), (0, 1))  
+        height_half = pixels.shape[1] // 2
+        upper_half = pixels[:,:height_half,:].numpy().astype(np.uint8).transpose(1, 2, 0)
+        lower_half = pixels[:,height_half:,:].numpy().astype(np.uint8).transpose(1, 2, 0)
+        #flow = torch.Tensor(np.pad(calculate_optical_flow(upper_half, lower_half), pad_width=pad_width, constant_values=0)).float().permute(2, 0, 1) 
+            
+        # replace with the image difference       
+        pixels[0,:height_half,:] = pixels[:,height_half:,:].mean(dim=0) - pixels[:,:height_half,:].mean(dim=0)
+        pixels[1,:height_half,:] = pixels[:,:height_half,:].mean(dim=0)
+
+        #print(pixels.shape, image_input.shape)
+
+        # image scaling factor
+        scale_y = float(pixels.shape[1]) / image_input.shape[0] # pixels is in C, H, W, image_input is in H, W, C
+        scale_x = float(pixels.shape[2]) / image_input.shape[1]
+
+        # recalculate bboxes after image rescaling
+        scale_matrix = np.array([[scale_y, 0.0], [0.0, scale_x]])
+
+        # reposition bboxes for merge
+        bboxes_trans = None
+        if bboxes is not None:
+            if shift_labels:
+                bboxes[0] = np.array([bboxes[0][0] + images[0].shape[0], bboxes[0][1], bboxes[0][2] + images[0].shape[0], bboxes[0][3]])
+            #print("scale", scale_matrix)
+            #print("bboxes before", bboxes)
+            bboxes_trans = torch.tensor(np.array([np.matmul(scale_matrix, bbox.reshape(2, 2).T).T.reshape(4) for bbox in bboxes]).astype(int))
+        #print("bboxes", bboxes_trans)
+        #print(bboxes_trans)
+        
+        return pixels, mask, bboxes_trans
+
+
+class VehicleSegmentationDataset(VehicleDatasetBase):
     def __init__(self, data_dir, labels_dir, feature_extractor, ignore=True):
         """
         Args:
@@ -50,6 +109,7 @@ class VehicleSegmentationDataset(Dataset):
             transform (callable, optional): Transformation to apply to the input images.
             mask_transform (callable, optional): Transformation to apply to the masks.
         """
+        super().__init__()
         self.feature_extractor = feature_extractor
         self.data_dir = data_dir 
         self.labels_dir = labels_dir
@@ -63,14 +123,7 @@ class VehicleSegmentationDataset(Dataset):
         # filter out ignored frames
         if ignore:
             self.image_paths = list(map(lambda x: x[1], filter(lambda x: x[0] not in self.ignored_frames, enumerate(self.image_paths))))
-            self.labels_paths = list(map(lambda x: x[1], filter(lambda x: x[0] not in self.ignored_frames, enumerate(self.labels_paths))))
-        
-        self.transform = None   
-        # For the masks, we need to use nearest neighbor interpolation to avoid label mixing.
-        self.mask_transform = transforms.Compose([
-            transforms.Resize((512, 512), interpolation=Image.NEAREST),
-            transforms.ToTensor(),
-        ])
+            self.labels_paths = list(map(lambda x: x[1], filter(lambda x: x[0] not in self.ignored_frames, enumerate(self.labels_paths))))        
 
 
     def __len__(self):
@@ -114,7 +167,7 @@ class VehicleSegmentationDataset(Dataset):
 
         return {"pixel_values": pixels, "labels": mask}
 
-class VehicleSegmentationAugmentedDataset(Dataset):
+class VehicleSegmentationAugmentedDataset(VehicleDatasetBase):
 
     def __init__(self, data_dir, feature_extractor, ignore=True, num_items=100):
         """
@@ -123,6 +176,7 @@ class VehicleSegmentationAugmentedDataset(Dataset):
             transform (callable, optional): Transformation to apply to the input images.
             mask_transform (callable, optional): Transformation to apply to the masks.
         """
+        super().__init__()
         self.feature_extractor = feature_extractor
         self.data_dir = data_dir 
         self.labels_dir = labels_dir
@@ -166,50 +220,7 @@ class VehicleSegmentationAugmentedDataset(Dataset):
         
         return {"pixel_values": pixels, "labels": mask, "boxes": bboxes_trans }
 
-    def _prepare_output_data(self, images, image_labels, bboxes, shift_labels=True):
-        # stack 2nd, 1st images
-        image_input: NDArray[Any] = np.concatenate([images[0], images[1]], axis=0)
-        # stack 2nd and 3rd labels
-        label_input = np.concatenate([image_labels[2], image_labels[1]], axis=0)
-            
-        pixels = self.feature_extractor(images=image_input, return_tensors="pt")["pixel_values"].squeeze(0)
-        
-        # replace top
-        pad_width = ((0, 0), (0, 0), (0, 1))  
-        height_half = pixels.shape[1] // 2
-        upper_half = pixels[:,:height_half,:].numpy().astype(np.uint8).transpose(1, 2, 0)
-        lower_half = pixels[:,height_half:,:].numpy().astype(np.uint8).transpose(1, 2, 0)
-        #flow = torch.Tensor(np.pad(calculate_optical_flow(upper_half, lower_half), pad_width=pad_width, constant_values=0)).float().permute(2, 0, 1) 
-         
-        # replace with the image difference       
-        pixels[0,:height_half,:] = pixels[:,height_half:,:].mean(dim=0) - pixels[:,:height_half,:].mean(dim=0)
-        pixels[1,:height_half,:] = pixels[:,:height_half,:].mean(dim=0)
-
-        arr_uint8 = (np.clip(label_input, 0, 1) * 255).astype(np.uint8)
-        pixels_label = self.mask_transform(Image.fromarray(arr_uint8))
-
-        #print(pixels.shape, image_input.shape)
-
-        # image scaling factor
-        scale_y = float(pixels.shape[1]) / image_input.shape[0] # pixels is in C, H, W, image_input is in H, W, C
-        scale_x = float(pixels.shape[2]) / image_input.shape[1]
-
-        # recalculate bboxes after image rescaling
-        scale_matrix = np.array([[scale_y, 0.0], [0.0, scale_x]])
-        
-        # reposition bboxes for merge
-        if shift_labels:
-            bboxes[0] = np.array([bboxes[0][0] + images[0].shape[0], bboxes[0][1], bboxes[0][2] + images[0].shape[0], bboxes[0][3]])
-        #print("scale", scale_matrix)
-        #print("bboxes before", bboxes)
-        bboxes_trans = torch.tensor(np.array([np.matmul(scale_matrix, bbox.reshape(2, 2).T).T.reshape(4) for bbox in bboxes]).astype(int))
-        #print("bboxes", bboxes_trans)
-        #print(bboxes_trans)
-
-        # only use the alpha channel to determine the mask
-        mask = pixels_label[3,:,:]
-
-        return pixels, mask, bboxes_trans
+    
 
     
 
@@ -286,6 +297,46 @@ class VehicleSegmentationAugmentedEvaluationDataset(VehicleSegmentationAugmented
         pixels, mask, trans_bboxes = self._prepare_output_data(images, image_labels, all_vehicle_bboxes.reshape(-1, 4), shift_labels=False )
         
         return {"pixel_values": pixels, "labels": mask, "boxes": trans_bboxes.reshape(self.num_vehicles, -1, 4) }
+
+
+class VehicleSegmentationUnlabeledEvaluationDataset(VehicleDatasetBase):
+
+    def __init__(self, video_file):
+        """
+        Args:
+            data_dir (str): Path to the folder containing input images.            
+            transform (callable, optional): Transformation to apply to the input images.
+            mask_transform (callable, optional): Transformation to apply to the masks.
+        """
+        super().__init__()
+        self.video_loader = cv2.VideoCapture(video_file, cv2.CAP_FFMPEG)
+        if not self.video_loader.isOpened():
+            raise Exception("could not open video file")
+    
+    def __len__(self):
+        return int(self.video_loader.get(cv2.CAP_PROP_FRAME_COUNT))
+
+    def __getitem__(self, idx):
+
+        frame_count = int(self.video_loader.get(cv2.CAP_PROP_FRAME_COUNT))
+
+        # get frames
+        frames = []
+        for i in range(idx-1, idx+2):
+            if i >= 0 and i < frame_count:
+                self.video_loader.set(cv2.CAP_PROP_POS_FRAMES, i)
+                im = self.video_loader.read()[1]
+                im = cv2.cvtColor(im, cv2.COLOR_BGR2RGB)
+                frames.append(im)
+            else:
+                frames.append(None)
+
+        frames[0] = frames[1].copy()
+        frames[-1] = frames[-2].copy()
+
+        pixels, _, _ = self._prepare_output_data(frames, None, None, shift_labels=False )
+
+        return {"pixel_values": pixels }
 
 
 # Paths to your data directories

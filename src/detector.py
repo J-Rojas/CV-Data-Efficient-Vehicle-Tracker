@@ -201,10 +201,7 @@ class SegmentationLightning(pl.LightningModule):
         return val_loader
 
     def evaluate(self, pixel_values, labels=None, temp=5.0, threshold=0.8):
-
-        if pixel_values.size(0) < 4:
-            pixel_values = pixel_values.unsqueeze(0)
-
+        
         logits = self.forward(**{"pixel_values": pixel_values})        
 
         # only look at the bottom half of the images, that is the current frame predition (the top is the 'next' frame predition)

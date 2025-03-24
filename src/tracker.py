@@ -12,7 +12,7 @@ from .tools import slice_from_bbox, patch_matching_cross_correlation, find_best_
 from skimage import measure
 from bisect import bisect_left
 from typing import Tuple
-from .loader import VehicleSegmentationAugmentedEvaluationDataset, DataLoader, validation_images_dir, labels_dir, feature_extractor
+from .loader import VehicleSegmentationAugmentedEvaluationDataset, VehicleSegmentationUnlabeledEvaluationDataset, DataLoader, validation_images_dir, labels_dir, feature_extractor
 
 OUTPUT_SIZE = [272, 640]
 OUTPUT_SIZE_CV = [640, 272]
@@ -253,7 +253,7 @@ class Tracker():
                     scores_br = []
                     region = region_maps.get(key)
 
-                    print(f"Pass: {i}, key {key}, region {region}")
+                    #print(f"Pass: {i}, key {key}, region {region}")
 
                     for k, im in zip(keys, pixel_regions):
                         if k == key:
@@ -271,8 +271,8 @@ class Tracker():
                     #print(offsets_tl)
                     #print(offsets_br)                
                     
-                    pad_tl = np.ceil(offsets_tl.mean(axis=0)).astype(np.int32)
-                    pad_br = np.ceil(offsets_br.mean(axis=0)).astype(np.int32)
+                    pad_tl = np.ceil(offsets_tl.mean(axis=0)).astype(np.int32) if offsets_tl.size > 0 else np.array([0, 0])
+                    pad_br = np.ceil(offsets_br.mean(axis=0)).astype(np.int32) if offsets_br.size > 0 else np.array([0, 0])
 
                     #print(pad_tl)
                     #print(pad_br)                
@@ -293,7 +293,7 @@ class Tracker():
         for obj in self.objects:
             for key in obj.frame_pixels.keys():
                 region = obj.get_containing_region(key)
-                print(f"Final: key {key}, region {region}")
+                #print(f"Final: key {key}, region {region}")
 
 
     def is_region_valid(self, bbox):
@@ -348,7 +348,7 @@ class Tracker():
             if tracking_object == None:
                 # new object
                 id = len(self.objects)
-                print("New object detected: ", region.bbox, id)
+                #print("New object detected: ", region.bbox, id)
                 tracking_object = TrackingObject(id)
                 self.objects.append(tracking_object)
 
@@ -369,7 +369,7 @@ class Tracker():
         for idx, image in enumerate(im):
             mask = pred_mask[idx]
             self.determine_objects_from_masks(offset + idx, image.detach().cpu().numpy(), mask)
-            self.log_active_tracks(offset + idx)
+            #self.log_active_tracks(offset + idx)
         
         return im, pred_mask, logits, loss
 
@@ -450,7 +450,7 @@ class Tracker():
             (np.abs(filtered_diff[:,0]) >= sizes[:,0] * 0.1) | (np.abs(filtered_diff[:,1]) >= sizes[:,1] * 0.1)            
         )[0]
 
-        print(valid_items)
+        #print(valid_items)
 
         if len(valid_items) == 0:
             # object is too unstable to consider
@@ -548,8 +548,8 @@ class Tracker():
                     # find a representative region in the keyframe
                     #bbox = obj.get_containing_region(keyframe)
                     (y_off, x_off) = obj.find_best_fit(keyframe, idx)
-                    print(f"key {idx}, ", bbox)
-                    print(idx, keyframe, y_off, x_off, sizes_mean_kf[idx - min_frame, 0], sizes_mean_kf[idx - min_frame, 1])
+                    #print(f"key {idx}, ", bbox)
+                    #print(idx, keyframe, y_off, x_off, sizes_mean_kf[idx - min_frame, 0], sizes_mean_kf[idx - min_frame, 1])
                     # reposition and apply the mean width and height
                     cor_bboxes[idx] = (int(bbox[0] - y_off), int(bbox[1] - x_off), int(bbox[0] - y_off + sizes_mean_kf[idx - min_frame, 0]), int(bbox[1] - x_off + sizes_mean_kf[idx - min_frame, 1]))                                    
                 else:
@@ -624,6 +624,7 @@ def generate_tracks(tracker, loader, on_progress=None):
             cv2.imwrite(f"./tracking/regions/frame_{offset + i}.jpg", im)
         
         if on_progress:
+            print("Generating detections...")
             on_progress("Generating detections...",float(batch_index)/num_batches)
 
         offset += len(pixel_values)
@@ -641,6 +642,7 @@ def do_tracking_evaluation(args):
     enable_segmentation = args.enable_segmentation
     enable_smooth_tracking = args.enable_smooth_tracking
     enable_detection_tracking = args.enable_detection_tracking
+    input_video_file = args.input_video
     on_progress = None
     if "progress_callback" in args:
         on_progress = args.progress_callback
@@ -650,20 +652,25 @@ def do_tracking_evaluation(args):
     
     tracker = Tracker(model)
 
-    eval_dataset = VehicleSegmentationAugmentedEvaluationDataset(
-        validation_dir=validation_images_dir,
-        data_dir=labels_dir,
-        feature_extractor=feature_extractor,
-        num_vehicles=args.num_vehicles
-    )
-    eval_dataloader = DataLoader(eval_dataset, batch_size=8, shuffle=False, num_workers=4)
+    if input_video_file is not None:
+        eval_dataset = VehicleSegmentationUnlabeledEvaluationDataset(
+            input_video_file
+        )
+    else:
+        eval_dataset = VehicleSegmentationAugmentedEvaluationDataset(
+            validation_dir=validation_images_dir,
+            data_dir=labels_dir,
+            feature_extractor=feature_extractor,
+            num_vehicles=args.num_vehicles
+        )
+    eval_dataloader = DataLoader(eval_dataset, batch_size=8, shuffle=False, num_workers=0)
     
-    if not os.path.exists(args.load) or args.num_vehicles > 1:
+    if not os.path.exists(args.load) or args.num_vehicles > 1 or input_video_file is not None:
 
         generate_tracks(tracker, eval_dataloader, on_progress)
         
         # write output
-        if args.num_vehicles == 1:
+        if args.num_vehicles == 1 and input_video_file is None:
             torch.save(tracker.to_json(), args.load)
 
     else:
@@ -673,6 +680,7 @@ def do_tracking_evaluation(args):
     tracker.filter_detection_masks()
     
     if on_progress:
+        print("Generating object tracking trajectories")
         on_progress("Generating object tracking trajectories", 1.0)        
     tracking_bboxes, corrections = tracker.determine_tracking_trajectories()
     
@@ -685,22 +693,25 @@ def do_tracking_evaluation(args):
     ious = []
     tracked_ious = []
     
+    print("Generating visual outputs...")
+
     idx = 0
     for batch_idx, data in enumerate(eval_dataloader):
 
         images = data["pixel_values"]
-        boxes = data["boxes"]
+        boxes = data["boxes"] if "boxes" in data else None
         
-        for im, boxes in zip(images, boxes):
+        for frame_idx, im in enumerate(images):
         
             # use the lower half of the images with the current frame color values, convert to CV format
             im = im[:,tracker.detector.IMAGE_OUTPUT_SIZE[0]:,:]
             im = torch_to_cv2_image(im.detach(), denormalize=True)
             # grab the boxes for the current frame 
-            boxes = boxes[:,0,:]
+            labeled_boxes = boxes[frame_idx, :,0,:] if boxes is not None else None
 
-            bbox_mapping = tracker.find_matching_by_bounding_box(idx, boxes)
-            is_visible = [is_box_visible(tracker, bbox) for bbox in boxes]
+            if labeled_boxes is not None:
+                bbox_mapping = tracker.find_matching_by_bounding_box(idx, labeled_boxes)
+                is_visible = [is_box_visible(tracker, bbox) for bbox in labeled_boxes]
             
             for obj_idx in tracking_bboxes.keys():
                 
@@ -708,7 +719,8 @@ def do_tracking_evaluation(args):
                 corr_bbox = corrections[obj_idx].get(idx, None)
 
                 # find the associated bbox for this object from the box mapping
-                expected_bbox_idx = bbox_mapping.get(obj_idx)
+                if labeled_boxes is not None:
+                    expected_bbox_idx = bbox_mapping.get(obj_idx)
 
                 obj = tracker.objects[obj_idx]
                 
@@ -722,24 +734,21 @@ def do_tracking_evaluation(args):
                         y1, x1, y2, x2 = bbox            
                         cv2.putText(im, str(obj.num_id), (x1, y2), cv2.FONT_HERSHEY_PLAIN, 1.0, (255, 255, 0))
                         cv2.rectangle(im, (x1, y1), (x2, y2), color=(0, 0, 255), thickness=2)            
-                
-
-                
-                if expected_bbox_idx != None and is_visible[expected_bbox_idx]:
+                            
+                if labeled_boxes is not None and expected_bbox_idx != None and is_visible[expected_bbox_idx]:
                     if bbox is not None:
-                        ious.append(iou(boxes[expected_bbox_idx], bbox))
+                        ious.append(iou(labeled_boxes[expected_bbox_idx], bbox))
                     else:
                         ious.append(0)
-                
                 
                 if corr_bbox is not None:                
                     if enable_smooth_tracking:                
                         y1, x1, y2, x2 = corr_bbox                
                         cv2.rectangle(im, (x1, y1), (x2, y2), color=(255, 0, 0), thickness=2)            
                 
-                if expected_bbox_idx != None and is_visible[expected_bbox_idx]:
+                if labeled_boxes is not None and expected_bbox_idx != None and is_visible[expected_bbox_idx]:
                     if corr_bbox is not None:
-                        tracked_ious.append(iou(boxes[expected_bbox_idx], corr_bbox))
+                        tracked_ious.append(iou(labeled_boxes[expected_bbox_idx], corr_bbox))
                     else:
                         tracked_ious.append(0)
                 
@@ -750,7 +759,7 @@ def do_tracking_evaluation(args):
             cv2.imwrite(f"./tracking/tracks/frame_{idx}.jpg", rescaled_im)
             video_out.write(rescaled_im)
 
-            if on_progress:
+            if on_progress:                
                 on_progress("Generating visual outputs...",float(idx)/len(eval_dataset))
 
 
@@ -777,6 +786,7 @@ if __name__ == '__main__':
     argparser.add_argument("--enable_detection_tracking", default=True, action='store_true')
     argparser.add_argument("--enable_segmentation", default=False, action='store_true')
     argparser.add_argument("--num_vehicles", default=1, type=int)
+    argparser.add_argument("--input_video", default=None)
     
     args = argparser.parse_args()
 

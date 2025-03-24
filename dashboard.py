@@ -39,6 +39,11 @@ def evaluate(**kwargs):
     metrics = do_tracking_evaluation(Namespace(**kwargs))    
     return metrics 
 
+def on_change_dataset():
+    st.session_state.disabled_vehicles = input_data == TestData.TEST_ORIGINAL.value
+    st.session_state.num_vehicles = 1
+    
+    
 st.title("Computer Vision Demo - Vehicle Tracker Dashboard")
 
 class ModelOptions(Enum):
@@ -46,15 +51,26 @@ class ModelOptions(Enum):
     SEGFORMER_OPT_FLOW = "SegFormer (Optical Flow)"
     SEGFORMER_IMAGE_SEQ = "SegFormer (Image Sequence)"
 
+class TestData(Enum):
+    TEST_ORIGINAL = "Original Data"
+    TEST_SEQ_ONE = "Test Seq. 1"
+
+# Initialize session state variables if they don't exist
+if "disabled_vehicles" not in st.session_state:
+    st.session_state.disabled_vehicles = False
+if "num_vehicles" not in st.session_state:
+    st.session_state.num_vehicles = 1
+
 # Sidebar for setting training parameters
 st.sidebar.header("Evaluation Parameters")
 model = st.sidebar.selectbox("Detector Model", options=[ModelOptions.SEGFORMER_IMAGE_DIFF.value, ModelOptions.SEGFORMER_OPT_FLOW.value, ModelOptions.SEGFORMER_IMAGE_SEQ.value])
-number_of_vehicles = st.sidebar.number_input("Number of vehicles", min_value=1, max_value=10, value=1, step=1)
+input_data = st.sidebar.selectbox("Test Data", options=[TestData.TEST_ORIGINAL.value, TestData.TEST_SEQ_ONE.value], on_change=on_change_dataset)
+number_of_vehicles = st.sidebar.number_input("Number of vehicles", min_value=1, max_value=10, value=1, step=1, disabled=st.session_state.disabled_vehicles, key="num_vehicles")
 smooth_tracking = st.sidebar.checkbox("Enable Smoothed Tracking", value=True)
 detection_tracking = st.sidebar.checkbox("Enable Detection Tracking", value=False)
 segmentation = st.sidebar.checkbox("Enable Segmentation", value=False)
 
-st.write("Adjust the training parameters in the sidebar and then click the **Start Training** button.")
+st.write("Adjust the evaluation parameters in the sidebar and then click the **Evaluate** button.")
 
 if st.button("Evaluate"):
     st.write("Starting evaluation...")
@@ -70,6 +86,11 @@ if st.button("Evaluate"):
     elif model == ModelOptions.SEGFORMER_IMAGE_SEQ.value:
         model_path = "./checkpoints/model_3frame_iou_0_93.ckpt"
 
+    if input_data == TestData.TEST_ORIGINAL.value:
+        input_data_file = None
+    elif input_data == TestData.TEST_SEQ_ONE.value:
+        input_data_file = "./data/test_seq1.avi"
+
     metrics = evaluate(**{
         "checkpoint_path": model_path,
         "load": f"./{Path(str(model)).name.replace('.ckpt', '')}_regions.pth",
@@ -77,7 +98,8 @@ if st.button("Evaluate"):
         "enable_detection_tracking": detection_tracking,
         "enable_segmentation": segmentation,
         "num_vehicles": number_of_vehicles,
-        "progress_callback": lambda mesg, perc: (st.session_state.progress_bar.progress(perc), st.session_state.status_text.text(mesg))
+        "progress_callback": lambda mesg, perc: (st.session_state.progress_bar.progress(perc), st.session_state.status_text.text(mesg)),
+        "input_video": input_data_file
     })
 
     st.subheader("IoU Score")
@@ -89,7 +111,11 @@ if st.button("Evaluate"):
     #st.video("./reencoded_video.mp4")
 
     st.subheader("IoU Score")
-    st.write(f"The Intersection over Union (IoU) score is: **{metrics['mean_detection_iou']:.4f}**")
+    if metrics['mean_detection_iou'] >= 0:
+        st.write(f"The Intersection over Union (IoU) Smoothed score is: **{metrics['mean_tracked_iou']:.4f}**")
+        st.write(f"The Intersection over Union (IoU) Raw Detection score is: **{metrics['mean_detection_iou']:.4f}**")
+    else:
+        st.write(f"This data is unlabeled and has no IoU scoring available.")
     
     
     

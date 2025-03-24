@@ -407,7 +407,10 @@ def patch_matching_cross_correlation(image, template, use_convolve=False, pad=Fa
             numerator = np.sum(norm_windows * norm_template, axis=(-1, -2))
             denominator = windows_std * template_std * h * w
 
+            err = np.geterr()
+            np.seterr(all='ignore')
             corr_map = np.where(denominator == 0, 0, numerator / denominator)
+            np.seterr(**err)
         else:
             corr_map = np.sum(windows * template, axis=(-1, -2))
 
