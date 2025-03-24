@@ -51,6 +51,8 @@ st.sidebar.header("Evaluation Parameters")
 model = st.sidebar.selectbox("Detector Model", options=[ModelOptions.SEGFORMER_IMAGE_DIFF.value, ModelOptions.SEGFORMER_OPT_FLOW.value, ModelOptions.SEGFORMER_IMAGE_SEQ.value])
 number_of_vehicles = st.sidebar.number_input("Number of vehicles", min_value=1, max_value=10, value=1, step=1)
 smooth_tracking = st.sidebar.checkbox("Enable Smoothed Tracking", value=True)
+detection_tracking = st.sidebar.checkbox("Enable Detection Tracking", value=False)
+segmentation = st.sidebar.checkbox("Enable Segmentation", value=False)
 
 st.write("Adjust the training parameters in the sidebar and then click the **Start Training** button.")
 
@@ -70,7 +72,12 @@ if st.button("Evaluate"):
 
     metrics = evaluate(**{
         "checkpoint_path": model_path,
-        "load": "./regions.pth"
+        "load": f"./{Path(str(model)).name.replace('.ckpt', '')}_regions.pth",
+        "enable_smooth_tracking": smooth_tracking,
+        "enable_detection_tracking": detection_tracking,
+        "enable_segmentation": segmentation,
+        "num_vehicles": number_of_vehicles,
+        "progress_callback": lambda mesg, perc: (st.session_state.progress_bar.progress(perc), st.session_state.status_text.text(mesg))
     })
 
     st.subheader("IoU Score")

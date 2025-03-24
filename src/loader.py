@@ -232,7 +232,7 @@ class VehicleSegmentationAugmentedEvaluationDataset(VehicleSegmentationAugmented
                 self.boxes,
                 length=len(self.bg_image_paths),
                 position_range=[[0, 1.0], [0, 0.75]],
-                velocity_range=[0.0,0.2],
+                velocity_range=[0.0,0.1],
                 velocity_noise=[0.005,0.01],
                 direction_range=[45, 120]                              
             ),

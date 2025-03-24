@@ -673,7 +673,7 @@ def do_tracking_evaluation(args):
     tracker.filter_detection_masks()
     
     if on_progress:
-        on_progress("Generating object tracking trajectories", 1.0)
+        on_progress("Generating object tracking trajectories", 1.0)        
     tracking_bboxes, corrections = tracker.determine_tracking_trajectories()
     
     size = OUTPUT_SIZE_CV
@@ -749,6 +749,10 @@ def do_tracking_evaluation(args):
 
             cv2.imwrite(f"./tracking/tracks/frame_{idx}.jpg", rescaled_im)
             video_out.write(rescaled_im)
+
+            if on_progress:
+                on_progress("Generating visual outputs...",float(idx)/len(eval_dataset))
+
 
             idx += 1
 
