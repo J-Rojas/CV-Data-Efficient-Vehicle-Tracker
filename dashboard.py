@@ -102,7 +102,11 @@ if st.button("Evaluate"):
         "enable_segmentation": segmentation,
         "num_vehicles": number_of_vehicles,
         "progress_callback": lambda mesg, perc: (st.session_state.progress_bar.progress(perc), st.session_state.status_text.text(mesg)),
-        "input_video": input_data_file
+        "input_video": input_data_file,
+        "tracking_dir": "./tracking",
+        "detect_all": False,
+        "dir": None,
+        "rerun_detection": False
     })
 
     st.subheader("IoU Score")
