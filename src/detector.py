@@ -1,8 +1,8 @@
 import os
 import torch
 import torch.nn as nn
-from transformers import AutoFeatureExtractor, AutoModel, SegformerForSemanticSegmentation, SegformerFeatureExtractor, SegformerConfig
 import pytorch_lightning as pl
+from transformers import SegformerForSemanticSegmentation, SegformerConfig, logging as hf_logging
 from pytorch_lightning import Trainer
 from pytorch_lightning.callbacks import ModelCheckpoint
 from torchmetrics import JaccardIndex
@@ -24,8 +24,10 @@ class SegmentationLightning(pl.LightningModule):
         self.save_hyperparameters()
         # Load the feature extractor and model
         model_name = "nvidia/segformer-b0-finetuned-cityscapes-512-1024"
+        hf_logging.set_verbosity_error()
         config = SegformerConfig(num_labels = num_classes, classifier_dropout_prob=0.5)
         self.model = SegformerForSemanticSegmentation.from_pretrained(model_name, config=config, ignore_mismatched_sizes=True)
+        hf_logging.set_verbosity_warning()
         self.model.decode_head.classifier.apply(init_weights)
         self.iou_metric = JaccardIndex(task="multiclass", num_classes=2).to(self.model.device)
         
@@ -36,7 +38,7 @@ class SegmentationLightning(pl.LightningModule):
         for param in self.model.decode_head.parameters():
             param.requires_grad = True
 
-        print(self.model)
+        #print(self.model)
 
 
     def forward(self, pixel_values):

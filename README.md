@@ -138,10 +138,18 @@ conda env create -f environment.yml
 conda activate vehicle-tracking
 ```
 
+**Note**: It is assumed you have a working CUDA environment for GPU access. If not, the scripts will run using CPU only.
+
 Generate the augmentation data which is required for the sample data tracker. It is best to run this on a GPU enabled system.
 
 ```bash
 python -m src.augment_images
+```
+
+Instead of using the augmented sample data, you can skip this step and run the tracker directly on a data directory. A simple script is provided for convenience.
+
+```bash
+./run_tracker.sh DATA_DIRECTORY
 ```
 
 **Training the Detector:**
@@ -192,6 +200,8 @@ When using custom datasets or other augmentation parameters, the cache file is i
 ```bash
 python -m src.tracker --dir DATA_DIRECTORY
 ```
+
+By default, only the primary object is tracked. If you have trouble seeing certain vehicle tracking in custom datasets, specify the `--detect_all` option. This will show all detected objects in the scene.
 
 **Dashboard Utility**
 

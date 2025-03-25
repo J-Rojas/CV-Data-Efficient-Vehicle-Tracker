@@ -1,9 +1,7 @@
-from src.detector import SegmentationLightning
 import numpy as np
 import cv2
 import torch
 import os.path    
-import glob
 import pandas as pd
 import argparse    
 from numpy.lib.stride_tricks import sliding_window_view
@@ -13,6 +11,8 @@ from skimage import measure
 from bisect import bisect_left
 from typing import Tuple
 from .loader import VehicleSegmentationAugmentedEvaluationDataset, VehicleSegmentationEvaluationDataset, DataLoader, validation_images_dir, labels_dir, feature_extractor
+from src.detector import SegmentationLightning
+
 
 OUTPUT_SIZE = [272, 640]
 OUTPUT_SIZE_CV = [640, 272]
@@ -644,6 +644,7 @@ def do_tracking_evaluation(args):
     enable_segmentation = args.enable_segmentation
     enable_smooth_tracking = args.enable_smooth_tracking
     enable_detection_tracking = args.enable_detection_tracking
+    detect_all = args.detect_all or args.num_vehicles > 1
     input_file = args.input_video or args.dir
     rerun_detections = args.rerun_detection or (not os.path.exists(args.load) or args.num_vehicles > 1 or input_file is not None)
     
@@ -702,6 +703,10 @@ def do_tracking_evaluation(args):
     
     print("Generating visual outputs...")
 
+    to_track = [0]
+    if detect_all:
+        to_track = tracking_bboxes.keys()
+
     idx = 0
     for batch_idx, data in enumerate(eval_dataloader):
 
@@ -720,7 +725,7 @@ def do_tracking_evaluation(args):
                 bbox_mapping = tracker.find_matching_by_bounding_box(idx, labeled_boxes)
                 is_visible = [is_box_visible(tracker, bbox) for bbox in labeled_boxes]
             
-            for obj_idx in tracking_bboxes.keys():
+            for obj_idx in to_track:
                 
                 bbox = tracking_bboxes[obj_idx].get(idx, None)
                 corr_bbox = corrections[obj_idx].get(idx, None)
@@ -797,6 +802,7 @@ if __name__ == '__main__':
     argparser.add_argument("--input_video", default=None, help="Use input video file")
     argparser.add_argument("--dir", default=None, help="Path to input data directory")
     argparser.add_argument("--tracking_dir", default=None, help="Directory to save tracking output")
+    argparser.add_argument("--detect_all", default=None, action='store_true', help="Show all object detections")
     
     args = argparser.parse_args()
 

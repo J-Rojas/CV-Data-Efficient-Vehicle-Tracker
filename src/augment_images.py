@@ -4,7 +4,12 @@ import numpy as np
 from transformers import SamModel, SamProcessor
 from .tools import extract_masked_pixels, inpaint_pixels_with_mask, extend_image_with_edge, crop_to_nonzero, save_with_transparency
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+if torch.cuda.is_available():
+    device = torch.device("cuda")
+#elif torch.mps.is_available():
+#    device = torch.device("mps")
+else:
+    device = torch.device("cpu")
 sam_model = SamModel.from_pretrained("facebook/sam-vit-base").to(device)
 sam_processor = SamProcessor.from_pretrained("facebook/sam-vit-base")
 
@@ -30,8 +35,6 @@ def custom_inpaint(im, bbox):
 def generate_segment_mask(im, bbox):
     
     # Load the SAM model (adjust model_type and checkpoint path as needed)
-    model_type = "vit_b"  # or another variant
-    checkpoint = "path/to/sam_vit_b.pth"
     input_points = [[[bbox[0], bbox[1]], [bbox[2], bbox[3]]]]
 
     inputs = sam_processor(im, input_points=input_points, return_tensors="pt")

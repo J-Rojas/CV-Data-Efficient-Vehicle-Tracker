@@ -1,17 +1,17 @@
-from numpy._typing._array_like import NDArray
 import os
 import glob
-from typing import Any
 import numpy as np
 import cv2
-from PIL import Image, ImageDraw
 import torch
-from torch.utils.data import Dataset, DataLoader
-from .tools import create_fuzzy_label_rect, create_label_rect, calculate_optical_flow
-from .augment import generate_random_sequence, merge_background_and_foreground_sequences, get_fixed_bg_params, get_fixed_fg_params, get_fixed_bg_params_none
 import torchvision.transforms as transforms
 import pandas as pd
-from transformers import SegformerFeatureExtractor
+import warnings
+from typing import Any
+from numpy._typing._array_like import NDArray
+from PIL import Image
+from transformers import SegformerImageProcessor
+from torch.utils.data import Dataset, DataLoader
+from .augment import generate_random_sequence, merge_background_and_foreground_sequences, get_fixed_bg_params, get_fixed_fg_params, get_fixed_bg_params_none
 
 def get_image_sequences(idx, image_paths, labels_paths):
     images = []
@@ -287,14 +287,19 @@ class VehicleSegmentationEvaluationDataset(VehicleDatasetBase):
         if os.path.isdir(file_or_dir):
             self.image_paths = sorted(glob.glob(f"{file_or_dir}/*.jpg"))
         else:
-            self.video_loader = cv2.VideoCapture(file_or_dir, cv2.CAP_FFMPEG)
-            if not self.video_loader.isOpened():
-                raise Exception("could not open video file")
+            self.video_loader = file_or_dir
         if os.path.exists(f"{file_or_dir}/groundtruth.txt"):
             self.labels_df = pd.read_csv(f"{file_or_dir}/groundtruth.txt", header=None)
-    
+
+    def _open_video_file(self):
+        loader = cv2.VideoCapture(self.video_loader, cv2.CAP_FFMPEG)
+        if not loader.isOpened():
+            raise Exception("could not open video file")
+        return loader
+
+
     def __len__(self):
-        return int(self.video_loader.get(cv2.CAP_PROP_FRAME_COUNT)) if self.video_loader else len(self.image_paths)
+        return int(self._open_video_file().get(cv2.CAP_PROP_FRAME_COUNT)) if self.video_loader else len(self.image_paths)
 
     def __getitem__(self, idx):
 
@@ -310,8 +315,9 @@ class VehicleSegmentationEvaluationDataset(VehicleDatasetBase):
         for i in range(idx-1, idx+2):
             if i >= 0 and i < frame_count:
                 if self.video_loader:
-                    self.video_loader.set(cv2.CAP_PROP_POS_FRAMES, i)
-                    im = self.video_loader.read()[1]                    
+                    loader = self._open_video_file()
+                    loader.set(cv2.CAP_PROP_POS_FRAMES, i)
+                    im = loader.read()[1]
                 else:
                     im = cv2.imread(self.image_paths[idx])
                 im = cv2.cvtColor(im, cv2.COLOR_BGR2RGB)
@@ -324,7 +330,10 @@ class VehicleSegmentationEvaluationDataset(VehicleDatasetBase):
 
         pixels, _, bboxes_trans = self._prepare_output_data(frames, None, label_bboxes, shift_labels=False )
 
-        return {"pixel_values": pixels, "boxes": bboxes_trans.reshape(1, -1, 4) }
+        if bboxes_trans is not None:
+            return {"pixel_values": pixels, "boxes": bboxes_trans.reshape(1, -1, 4) }
+        else:
+            return {"pixel_values": pixels }
 
 
 # Paths to your data directories
@@ -332,7 +341,9 @@ validation_images_dir = "./data/"
 labels_dir = "./data_augment/"
 
 model_name = "nvidia/segformer-b0-finetuned-cityscapes-512-1024"
-feature_extractor = SegformerFeatureExtractor.from_pretrained(model_name)
+warnings.filterwarnings("ignore", category=UserWarning)
+feature_extractor = SegformerImageProcessor.from_pretrained(model_name)
+warnings.resetwarnings()
 
 # Create datasets
 #train_dataset = VehicleSegmentationDataset(
