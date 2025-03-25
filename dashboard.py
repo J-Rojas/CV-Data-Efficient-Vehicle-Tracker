@@ -1,3 +1,6 @@
+# Copyright (c) 2025, Jose Rojas (https://github.com/J-Rojas)
+# All rights reserved.
+
 import streamlit as st
 import numpy as np
 import matplotlib.pyplot as plt

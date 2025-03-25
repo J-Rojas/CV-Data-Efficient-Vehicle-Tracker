@@ -1,3 +1,6 @@
+# Copyright (c) 2025, Jose Rojas (https://github.com/J-Rojas)
+# All rights reserved.
+
 import cv2
 import numpy as np
 import math

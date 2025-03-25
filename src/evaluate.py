@@ -1,3 +1,5 @@
+# Copyright (c) 2025, Jose Rojas (https://github.com/J-Rojas)
+# All rights reserved.
 
 import os
 import torch
