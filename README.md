@@ -2,6 +2,8 @@
 
 This project implements a vehicle tracking algorithm to follow a car through a sequence of images. The goal is to build a robust, scalable solution that leverages deep learning and custom tracking logic to operate effectively even in low-data regimes.
 
+[![Demo Video](https://img.youtube.com/vi/FGI_iMgBYuU/0.jpg)](https://www.youtube.com/watch?v=FGI_iMgBYuU))
+
 ---
 
 ## Table of Contents
