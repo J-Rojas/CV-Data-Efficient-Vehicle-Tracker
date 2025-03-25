@@ -4,3 +4,9 @@ transformers
 cv2
 torch
 pytest
+albumentations
+scikit-image
+pytorch_lightning
+streamlit
+torchvision
+pillow
