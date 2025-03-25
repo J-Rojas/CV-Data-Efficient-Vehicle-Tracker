@@ -7,7 +7,7 @@ This project implements a vehicle tracking algorithm to follow a car through a s
 ## Table of Contents
 
 - [Data](#data)
-- [Implementation Guidelines](#implementation-guidelines)
+- [Implementation Guidelines](#implementation-details)
 - [Project Structure](#project-structure)
 - [Usage](#usage)
 - [Appendix: Disallowed OpenCV Methods](#appendix-disallowed-opencv-methods)
@@ -138,6 +138,12 @@ conda env create -f environment.yml
 conda activate vehicle-tracking
 ```
 
+Generate the augmentation data which is required for the sample data tracker. It is best to run this on a GPU enabled system.
+
+```bash
+python -m src.augment_images
+```
+
 **Training the Detector:**
 
 There are prebuilt models already available in the `./checkpoints` folder. The detector model can be custom trained using the following command. There currently are no command arguments for this.
@@ -177,6 +183,8 @@ You can specify a directory for input images. If a `groundtruth.txt` is availabl
 ```bash
 python -m src.tracker --dir DATA_DIRECTORY
 ```
+
+After the running the tracker, a video output file will be generated with the tracking boxes. You can also review the tracking output in the `./tracking` folder. Both can be configured via command line arguments.
 
 *Note*: When using the default data set, detections are cached to a file. This speeds up tracking generation if there options are changed. To rerun the detections, run the command below. 
 When using custom datasets or other augmentation parameters, the cache file is ignored.
