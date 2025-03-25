@@ -214,7 +214,7 @@ class VehicleSegmentationAugmentedDataset(VehicleDatasetBase):
         fg_trans = get_fixed_fg_params()
         bg_trans = get_fixed_bg_params()
 
-        selected_bg, selected_fg, start_positions, theta = generate_random_sequence(self.fg_image_paths, self.bg_image_paths, self.boxes, length=3, position_range=[0, 0.5])
+        selected_bg, selected_fg, start_positions, theta = generate_random_sequence(self.fg_image_paths, self.bg_image_paths, self.boxes, length=3, position_range=[[0, 1.0], [0, 0.25]])
         images, image_labels, bboxes = merge_background_and_foreground_sequences(selected_bg, selected_fg, start_positions, theta, fg_trans, bg_trans)
         pixels, mask, bboxes_trans = self._prepare_output_data(images, image_labels, bboxes)
         
