@@ -1,7 +1,7 @@
 numpy
 pandas
-transformers
-cv2
+transformers==4.49.0
+opencv-python
 torch
 pytest
 albumentations
