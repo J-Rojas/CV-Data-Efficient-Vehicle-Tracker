@@ -645,6 +645,8 @@ def do_tracking_evaluation(args):
     enable_smooth_tracking = args.enable_smooth_tracking
     enable_detection_tracking = args.enable_detection_tracking
     input_file = args.input_video or args.dir
+    rerun_detections = args.rerun_detection or (not os.path.exists(args.load) or args.num_vehicles > 1 or input_file is not None)
+    
     on_progress = None
     if "progress_callback" in args:
         on_progress = args.progress_callback
@@ -670,7 +672,7 @@ def do_tracking_evaluation(args):
         )
     eval_dataloader = DataLoader(eval_dataset, batch_size=8, shuffle=False, num_workers=4)
     
-    if not os.path.exists(args.load) or args.num_vehicles > 1 or input_file is not None:
+    if rerun_detections:
 
         generate_tracks(tracker, eval_dataloader, on_progress)
         
@@ -784,9 +786,10 @@ def do_tracking_evaluation(args):
 if __name__ == '__main__':
     
     # load the model
-    argparser = argparse.ArgumentParser()
-    argparser.add_argument("--checkpoint_path", default="./checkpoints/last.ckpt", required=False, help="Path to model file")
+    argparser = argparse.ArgumentParser(description="Vehicle Tracker")
+    argparser.add_argument("--checkpoint_path", default="./checkpoints/model_diff_grayscale_0_935.ckpt", required=False, help="Path to model file")
     argparser.add_argument("--load", default="./regions.pth", required=False, help="Detections caching file")
+    argparser.add_argument("--rerun_detection", default=False, action='store_true', required=False, help="Ignores the caching file for loading detections.")
     argparser.add_argument("--enable_smooth_tracking", default=True, action='store_true', help="Enable smooth tracking boxes in output [default]")
     argparser.add_argument("--enable_detection_tracking", default=False, action='store_true', help="Enable raw detection boxes in output")
     argparser.add_argument("--enable_segmentation", default=False, action='store_true', help="Enable segmentation masks in output")
