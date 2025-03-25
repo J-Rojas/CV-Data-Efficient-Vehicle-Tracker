@@ -3,7 +3,6 @@ lightning_logs/
 checkpoints*/
 data/
 data_*/
-torch2trt/
-YOLOX/
 utils/
 *.pyc
+tracking/
