@@ -34,59 +34,63 @@ This project implements a vehicle tracking algorithm to follow a car through a s
 
 - **Algorithmic Approach**
 
-The vehicle tracker is separated into two components, a detector model and a tracking algorithm. 
+  The vehicle tracker is separated into two components: a detector model and a tracking algorithm.
 
-The detector is a deeply learned model using a pretrained SegFormer architecture. This architecture generates per-pixel segmentation masks of vehicles. I choose this model as it provides more accurate detection at the pixel level, whereas using a model like YOLO-X will only provide bounding boxes. With per-pixel segmentation, detections with partial occlusions as seen in the sample data (eg. heavy tree occlusion) can be precisely trained. It should be acknowledged that segmentation models are not as lightweights and performant as a bounding box proposal model, however the focus of this project is batch processing of sample data, not necessarily real-time applications.
+  The detector is a deep learning model based on a pretrained SegFormer architecture. This architecture generates per-pixel segmentation masks of vehicles. I chose this model because it provides more accurate detection at the pixel level, whereas a model like YOLO-X would only provide bounding boxes. With per-pixel segmentation, detections with partial occlusions—as seen in the sample data (e.g., heavy tree occlusion)—can be precisely trained. It should be acknowledged that segmentation models are not as lightweight or as performant as a bounding-box proposal model; however, the focus of this project is on batch processing of sample data, not necessarily real-time applications.
 
-- Input Features
-  - Current RGB pixel data [ 3 channel, bottom half of input field ]
-  - Gray Scale delta from previous image in the input sequence [ 1 channel, top half of input field ]
-  - Gray Scale prior frame data [ 1 channel, top half of input field ]
-  - Gray Scale current frame data [ 1 channel, top half of input field ]
-  
-The detector model uses various features as described above, all merged into one fusion SegFormer model. The additional pixel data beyond the current frame assist with sequence modeling; the model uses prior frame data to better segment the current image by understanding what is currently moving in the scene, focusing less on color information, and more on structure changes. 
+- **Input Features**
+  - Current RGB pixel data [3 channels, bottom half of input field]
+  - Grayscale delta from the previous image in the input sequence [1 channel, top half of input field]
+  - Grayscale prior frame data [1 channel, top half of input field]
+  - Grayscale current frame data [1 channel, top half of input field]
 
-The features extracted above worked well. Originally I tried single RGB pixel data, which did not perform significantly well. I then tried using multiple frames of RGB data, which did perform better; this apparently helped the model to understand the changes in the scene to improve detections. I also trained the model with Optical Flow features. This provided a well performing model, improving IoU scoring to 0.94 during validation. However this approach is slower to train as the OpenCV library implementation runs on CPU. As the alternative, the final model used image differencing with gray scale features which provided similar performance as optical flow features, but with zero additional training overhead.
+  The detector model uses the features described above, merging them into one fusion SegFormer model. The additional pixel data beyond the current frame assist with sequence modeling; the model uses prior frame data to better segment the current image by focusing on structural changes rather than just color information.
 
-The tracker algorithm performs the object tracking and utilizes the detector model to highlight pixel regions in an image. It works in these phases below.
+  The features extracted above worked well. Initially, I tried using only single-frame RGB data, which did not perform significantly well. Then I tried using multiple frames of RGB data, which improved performance by helping the model understand scene changes. I also experimented with incorporating optical flow features, which improved the IoU scoring to 0.94 during validation. However, this approach was slower to train because the OpenCV implementation runs on CPU. As an alternative, the final model used image differencing with grayscale features, which provided similar performance to optical flow but with no additional training overhead.
 
-- Tracking Phases
-   - Detection Phase across entire sequence
-   - Refine detected regions
-   - Object trajectory generation using keyframes and correspondence matching
-   - Output visualization
+- **Tracker Algorithm**
 
-In the detection phase, as an object moves across the field of view, the detector will generate regions and the tracker will associate these detections with objects. The regions are clustered together and assigned to an object using spatial overlap from previous frame data, but could also be clustered by visual similarity and movement vectors to disambiguate them from overlapping objects.
+  The tracking algorithm performs object tracking by utilizing the detector model to highlight pixel regions in an image. It proceeds in several phases:
 
-Once the entire sequence has been processed, a refinement phase is performed. The detection model generates regions which tend to over-predict the boundary of the actual object under certain conditions. The refinement phase runs through all frames of each objects tracking history and performs a sliding window refinement process. Cross-correlation scores are used to compare the object boundaries between frames and reduce the size of the boundaries to be temporally consistent. This eliminates spurious over-predictions leading to far improved visual tracking stability.
+  - **Detection Phase:**  
+    As an object moves across the field of view, the detector generates regions, and the tracker associates these detections with objects. The regions are clustered together and assigned to an object using spatial overlap from previous frame data. They can also be clustered by visual similarity and movement vectors to disambiguate overlapping objects.
 
-The object trajectories are determined after the detection and refinement phases. The goal of this phases to generate a smooth trajectory based on the object detections made in the first phase. The idea for this is predicated upon this important concept: vehicles tend to have fixed shapes and thus consistent object sizing across a sequence of images. Given this information, the regions are clustered into keyframe groups, which are sequences where the vehicle has a stable visual size. If the visual size becomes unstable, this is likely due to an occlusion where detections become sparse or non-existent. To overcome the occlusion, regions with unstable tracking are compared to nearby keyframes and correspondence matching is performed using cross correlation to determine the mapping of detected regions to other regions in the sequence. By determining how the detections across frame map to each other, partial detections can thus rebuild the object's true size with the keyframe object size information. Object size stability and position can then be reconstructed if there are partial or missing detections. After all frames have been assigned correctly positioned and sized object regions, a final smoothing pass is performed on the region boxes to finalizing the objects tracking trajectory.
+  - **Refinement Phase:**  
+    Once the entire sequence has been processed, a refinement phase is performed. The detection model sometimes over-predicts the boundary of the actual object. The refinement phase runs through all frames of each object’s tracking history and performs a sliding-window refinement process. Cross-correlation scores are used to compare object boundaries between frames and reduce the size of the boundaries to achieve temporal consistency. This step eliminates spurious over-predictions and greatly improves visual tracking stability.
 
-Once trajectories are completed, output visualization is performed. If there are labels available, a matching algorithm is run to associate labels with objects by spatial proximity. IoU scoring can then be calculated to determine how well the trajactories perform. Smoothing tends to increase the IoU score by a few relative percentage points. Multiple vehicles can be tracked as the tracking algorithm can assign spatially distant regions to different objects, however as mentioned this can be refined by using visual similarity and other cues.
+  - **Trajectory Generation:**  
+    Object trajectories are generated after the detection and refinement phases. The goal is to create a smooth trajectory based on the object detections from the detection phase. The underlying idea is that vehicles tend to have fixed shapes and, thus, consistent sizes across a sequence of images. The regions are clustered into keyframe groups—sequences where the vehicle maintains a stable visual size. If the visual size becomes unstable (likely due to occlusion or sparse detections), regions with unstable tracking are compared to nearby keyframes, and correspondence matching is performed using cross-correlation to determine how the detected regions map to one another. This mapping helps reconstruct the object’s true size even when detections are partial or missing. After all frames have been assigned correctly positioned and sized regions, a final smoothing pass is performed to finalize the object’s tracking trajectory.
+
+  - **Output Visualization:**  
+    Once trajectories are completed, output visualization is performed. If labels are available, a matching algorithm associates labels with objects based on spatial proximity. IoU scoring can then be calculated to determine how well the trajectories perform. Smoothing typically increases the IoU score by a few percentage points. Multiple vehicles can be tracked simultaneously since the tracking algorithm can assign spatially distant regions to different objects; further refinement using visual similarity and other cues can improve the results.
 
 - **Training Approach**
 
-PyTorch Lightning was used as the deep learning framework. The HuggingFace package was used to import models and pre-trained weights. The SegFormer model I choose was pretrained on CityScapes, a dataset that has vehicle segmentation as a primary task. The model consists of approxiamately 4M parameters, 400k which are in the final deocder module head. This module was fine-tuned while the rest of the model weights were frozen. This essentially keeps the model's early layers focused on vehicle detection without overfitting to the new training set that has new visual features. Surprisingly the model adaptation worked well with image differencing and gray scale features which are out-of-distribution of the original training set. The model can be trained in about 5 minutes on a single T4 GPU, within 20-40 epochs depending on the seeded model.
+  PyTorch Lightning was used as the deep learning framework, and the HuggingFace package was used to import models and pretrained weights. The SegFormer model I chose was pretrained on CityScapes—a dataset focused on vehicle segmentation. The model consists of approximately 4M parameters, with around 400k in the final decoder module head. This module was fine-tuned while the rest of the model’s weights were frozen. This strategy keeps the model's early layers focused on vehicle detection without overfitting to new visual features present in the training set. Surprisingly, the model adaptation worked well with image differencing and grayscale features, even though these features are out-of-distribution compared to the original training set. The model can be trained in about 5 minutes on a single T4 GPU, within 20–40 epochs depending on the seed.
 
-This project's goal was to avoid using external data and only discover ways to train a model in a principled manner with only one data sequence. Towards this goal, data augmentation was a significant focus. To start, the sample data provided was segmented using a Segment Anything model to generate vehicle labels. The labels were reviewed and bad labels were marked to exclude them from training. These new labels are extracted vehicle pixels from each image, with no background pixels, which improves per-pixel vehicle detection accuracy. The label and background layers are then used for image augmentation during training. The training set is a completely synthetic mixture of random vehicle labels and backgrounds; each image contains one vehicle moving in random directions and positions across the image as well as having various size, color, contrast, hue, rotation, and shearing applied to but background and vehicle pixels. This acts as a form of regularization to help generalize the model and avoid overfitting to the sample data. 
+  The project’s goal was to train a model in a principled manner using only one data sequence, without relying on external data. To achieve this, data augmentation was a significant focus. Initially, the provided sample data was segmented using a Segment Anything model to generate vehicle labels. These labels were reviewed, and poor labels were excluded from training. The final labels consist of extracted vehicle pixels without background, which improves per-pixel detection accuracy. Both the label and background layers are then used for image augmentation during training. The training set is a completely synthetic mixture of random vehicle labels and backgrounds; each image contains one vehicle moving in random directions and positions, with variations in size, color, contrast, hue, rotation, and shearing applied to both background and vehicle pixels. This acts as a form of regularization to help generalize the model and avoid overfitting.
 
-The model is trained using various objective functions. A hyperparameter search was done using various combinations of loss functions with different tuning values. The final combination that worked best was BCE combined with a focal and dice loss, in a addition to a total variation loss that acted as a regularizing term. This helped enforce detected regions to be dense, essential for high quality and condifident predictions.
+  The model is trained using various objective functions. A hyperparameter search was performed with different combinations of loss functions. The final combination that worked best was binary cross-entropy (BCE) combined with focal and dice losses, in addition to a total variation loss that acted as a regularizer. This combination helped enforce that detected regions be dense, which is essential for high-quality, confident predictions.
 
-- **What didn't work**
+- **What Didn’t Work**
 
-For training, some loss functions didn't work well, like the IoU loss. This loss seemed to be unstable and lead to poor results. Also I tried a consistency loss that forced similarity between predictions in the segmenetation model's sequence based outputs. This loss seemed to act as too much of a regularizing factor that the model's training could not proceed past a certain point; I believe the model couldn't determine whether to grow or shrink the detected regions leading to it remaining stuck in the current local optimization minima. 
+  - **Loss Functions:**  
+    Some loss functions, such as the IoU loss, were unstable and produced poor results. A consistency loss that enforced similarity between the segmentation model's sequence-based outputs acted as too strong a regularizer, causing the model’s training to stagnate (the model could not decide whether to grow or shrink the detected regions, remaining stuck in a local minimum).
 
-Single frame detection segmentation alone did not offer good results. Using multiple frames as inputs did help, however it lead to heavy overpredictions of the vehicle boundaries as more frames were added (up to 5 were used). Optical flow features absolutely helped train the model to understand motion, however this seemed too powerful so image differencing was used instead and worked well.
+  - **Single Frame Detection:**  
+    Using only single-frame detection and segmentation did not yield good results. Incorporating multiple frames as input improved performance but led to heavy over-prediction of vehicle boundaries when more frames (up to 5) were used. Optical flow features helped the model understand motion; however, due to their computational cost, image differencing with grayscale features was ultimately used as it provided similar performance without additional training overhead.
 
-Occlusion augmentation was implemented; various vehicle pixels were clipped with stripping patterns and circular patterns during augmentation. The results of this test were inconclusive - there were many model adjustments happening that could have conflated the experimental results. I imagine this would help with occlusion generalization but would increase the training time to allow the model to adapt to this further regularization. 
+  - **Occlusion Augmentation:**  
+    Various occlusion augmentation techniques were implemented (e.g., clipping vehicle pixels with stripping and circular patterns). The results were inconclusive because multiple model adjustments were occurring simultaneously, which may have confounded the experiments.
 
-In terms of the tracker, trying to simply smoothly interpolate the object detections did not work well. Sliding window averages were poor substitutes for a more targeted approach focused on repairing the noisy areas of the sequence, and then doing a final phase of filtering. Refining the detection pixels could lead to decent outcomes, but looking at the samples with and without the detection refinement made it clear it was a major win, in particular with very small detections of distant objects that tend to be noisier. 
+  - **Tracker Interpolation:**  
+    Simple smoothing techniques (e.g., sliding-window averages) were not effective in repairing noisy detections. A more targeted approach that focused on refining and filtering the noisy areas of the sequence produced significantly better results, especially for small or distant objects.
 
 - **Limitations**
 
-The model has limitations based on its limited training set. I would imagine it will fail in out-of-distribution data, such as scenes were cars are detected from the front or from directly behind, or against backgrounds such as urban settings, or different vehicles form factors like trucks. The model does detect cars on similar test scenes based on experiments. Also multiple vehicle generation shows some gaps in detections particularly in regions where the target vehicle has low contrast with the background. The model may be overfitting to the 'roadway' as a specific detection signal.
+  The model has limitations due to its limited training set. It may fail on out-of-distribution data, such as scenes where vehicles are viewed from the front or rear, against urban backgrounds, or with different vehicle types (e.g., trucks). Although the model does detect cars in similar test scenes, synthetic multiple vehicle generation sometimes results in gaps in detection, particularly in regions where the target vehicle has low contrast with the background. The model may overfit to the 'roadway' as a specific detection signal.
 
-Multiple vehicle tracking does work but is not robust. If vehicles overlap, their regions are clustered together and not disambiguated. This leads to inappropriately assigned object labels as the vehicles move close to each other. As mentioned, visual similarity, speed, and direction of motion can be used to disambiguate the regions to better track overlapping objects.
+  Multiple vehicle tracking is functional but not fully robust. When vehicles overlap, their regions may be clustered together without proper disambiguation, leading to incorrect object assignments as the vehicles move closer together. Visual similarity, speed, and direction of motion could be further leveraged to improve tracking in such cases.
 
 ---
 
@@ -223,25 +227,6 @@ PYTHONPATH=. pytest
 
 ---
 
-## Approach and Discussion
-
-- **Algorithmic Approach:**
-  - Briefly describe the algorithm you implemented.
-  - Explain how your deep learning model is used (e.g., feature extraction, regression, etc.).
-  - Discuss any innovative ideas or transformations (e.g., handling occlusion, leveraging temporal context).
-
-- **Other Considered Approaches:**
-  - List alternative methods or architectures you considered.
-  - Mention any experiments that did not work as expected and what you learned.
-
-- **Potential Improvements:**
-  - Outline future enhancements that would improve the model’s robustness or efficiency.
-  - Discuss scalability considerations and how the approach could generalize to larger datasets.
-
-- **Pretrained Models:**
-  - If applicable, explain which pretrained models you used and why they were chosen.
-
----
 
 ## Appendix: Disallowed OpenCV Methods
 
