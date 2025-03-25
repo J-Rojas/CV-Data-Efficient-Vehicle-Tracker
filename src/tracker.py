@@ -12,7 +12,7 @@ from .tools import slice_from_bbox, patch_matching_cross_correlation, find_best_
 from skimage import measure
 from bisect import bisect_left
 from typing import Tuple
-from .loader import VehicleSegmentationAugmentedEvaluationDataset, VehicleSegmentationUnlabeledEvaluationDataset, DataLoader, validation_images_dir, labels_dir, feature_extractor
+from .loader import VehicleSegmentationAugmentedEvaluationDataset, VehicleSegmentationEvaluationDataset, DataLoader, validation_images_dir, labels_dir, feature_extractor
 
 OUTPUT_SIZE = [272, 640]
 OUTPUT_SIZE_CV = [640, 272]
@@ -595,6 +595,9 @@ class Tracker():
 def generate_tracks(tracker, loader, on_progress=None):
     offset = 0
     num_batches = len(loader)
+
+    print("Generating detections...")
+
     for batch_index, batch in enumerate(loader):
         
         pixel_values = batch["pixel_values"].to(DEVICE)
@@ -622,9 +625,8 @@ def generate_tracks(tracker, loader, on_progress=None):
 
 
             cv2.imwrite(f"./tracking/regions/frame_{offset + i}.jpg", im)
-        
-        if on_progress:
-            print("Generating detections...")
+                
+        if on_progress:            
             on_progress("Generating detections...",float(batch_index)/num_batches)
 
         offset += len(pixel_values)
@@ -636,13 +638,13 @@ def is_box_visible(tracker, bbox):
 def do_tracking_evaluation(args):
 
     # create paths
-    os.makedirs("./tracking/regions", exist_ok=True)
+    os.makedirs(f"{args.tracking_dir}/regions", exist_ok=True)
     os.makedirs("./tracking/tracks", exist_ok=True)
 
     enable_segmentation = args.enable_segmentation
     enable_smooth_tracking = args.enable_smooth_tracking
     enable_detection_tracking = args.enable_detection_tracking
-    input_video_file = args.input_video
+    input_file = args.input_video or args.dir
     on_progress = None
     if "progress_callback" in args:
         on_progress = args.progress_callback
@@ -652,25 +654,28 @@ def do_tracking_evaluation(args):
     
     tracker = Tracker(model)
 
-    if input_video_file is not None:
-        eval_dataset = VehicleSegmentationUnlabeledEvaluationDataset(
-            input_video_file
+    if input_file is not None:
+        if not os.path.exists(input_file):
+            raise Exception(f"input path '{input_file}' does not exist")
+
+        eval_dataset = VehicleSegmentationEvaluationDataset(
+            input_file
         )
     else:
         eval_dataset = VehicleSegmentationAugmentedEvaluationDataset(
             validation_dir=validation_images_dir,
-            data_dir=labels_dir,
+            augmentation_data_dir=labels_dir,
             feature_extractor=feature_extractor,
             num_vehicles=args.num_vehicles
         )
-    eval_dataloader = DataLoader(eval_dataset, batch_size=8, shuffle=False, num_workers=0)
+    eval_dataloader = DataLoader(eval_dataset, batch_size=8, shuffle=False, num_workers=4)
     
-    if not os.path.exists(args.load) or args.num_vehicles > 1 or input_video_file is not None:
+    if not os.path.exists(args.load) or args.num_vehicles > 1 or input_file is not None:
 
         generate_tracks(tracker, eval_dataloader, on_progress)
         
         # write output
-        if args.num_vehicles == 1 and input_video_file is None:
+        if args.num_vehicles == 1 and input_file is None:
             torch.save(tracker.to_json(), args.load)
 
     else:
@@ -679,8 +684,8 @@ def do_tracking_evaluation(args):
     # as a post processing step, filter all of the detections through the sequence to improve the tracking results
     tracker.filter_detection_masks()
     
-    if on_progress:
-        print("Generating object tracking trajectories")
+    print("Generating object tracking trajectories")
+    if on_progress:        
         on_progress("Generating object tracking trajectories", 1.0)        
     tracking_bboxes, corrections = tracker.determine_tracking_trajectories()
     
@@ -780,13 +785,15 @@ if __name__ == '__main__':
     
     # load the model
     argparser = argparse.ArgumentParser()
-    argparser.add_argument("--checkpoint_path", default="./checkpoints/last.ckpt", required=False)
-    argparser.add_argument("--load", default="./regions.pth", required=False)
-    argparser.add_argument("--enable_smooth_tracking", default=False, action='store_true')
-    argparser.add_argument("--enable_detection_tracking", default=True, action='store_true')
-    argparser.add_argument("--enable_segmentation", default=False, action='store_true')
-    argparser.add_argument("--num_vehicles", default=1, type=int)
-    argparser.add_argument("--input_video", default=None)
+    argparser.add_argument("--checkpoint_path", default="./checkpoints/last.ckpt", required=False, help="Path to model file")
+    argparser.add_argument("--load", default="./regions.pth", required=False, help="Detections caching file")
+    argparser.add_argument("--enable_smooth_tracking", default=True, action='store_true', help="Enable smooth tracking boxes in output [default]")
+    argparser.add_argument("--enable_detection_tracking", default=False, action='store_true', help="Enable raw detection boxes in output")
+    argparser.add_argument("--enable_segmentation", default=False, action='store_true', help="Enable segmentation masks in output")
+    argparser.add_argument("--num_vehicles", default=1, type=int, help="Add synthetic vehicles to output (only available with default data set)")
+    argparser.add_argument("--input_video", default=None, help="Use input video file")
+    argparser.add_argument("--dir", default=None, help="Path to input data directory")
+    argparser.add_argument("--tracking_dir", default=None, help="Directory to save tracking output")
     
     args = argparser.parse_args()
 
@@ -795,5 +802,6 @@ if __name__ == '__main__':
 
     metrics = do_tracking_evaluation(args)
     
-    print("Mean Detections IoU: ", np.mean(metrics["mean_detection_iou"]))
-    print("Mean Tracked IoU: ", np.mean(metrics["mean_tracked_iou"]))
+    if metrics["mean_detection_iou"] >= 0:
+        print("Mean Detections IoU: ", np.mean(metrics["mean_detection_iou"]))
+        print("Mean Tracked IoU: ", np.mean(metrics["mean_tracked_iou"]))

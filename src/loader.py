@@ -169,19 +169,13 @@ class VehicleSegmentationDataset(VehicleDatasetBase):
 
 class VehicleSegmentationAugmentedDataset(VehicleDatasetBase):
 
-    def __init__(self, data_dir, feature_extractor, ignore=True, num_items=100):
-        """
-        Args:
-            data_dir (str): Path to the folder containing input images.            
-            transform (callable, optional): Transformation to apply to the input images.
-            mask_transform (callable, optional): Transformation to apply to the masks.
-        """
+    def __init__(self, data_dir, labels_dir, feature_extractor, ignore=True, num_items=100):
         super().__init__()
         self.feature_extractor = feature_extractor
         self.data_dir = data_dir 
         self.labels_dir = labels_dir
-        self.bg_image_paths = sorted(glob.glob(os.path.join(data_dir, "*_background.jpg")))        
-        self.fg_image_paths = sorted(glob.glob(os.path.join(data_dir, "*_foreground.png")))        
+        self.bg_image_paths = sorted(glob.glob(os.path.join(labels_dir, "*_background.jpg")))        
+        self.fg_image_paths = sorted(glob.glob(os.path.join(labels_dir, "*_foreground.png")))        
         self.labels_paths = sorted(glob.glob(os.path.join(labels_dir, "*_foreground_label.png")))  
         #print(self.labels_df)   
 
@@ -194,17 +188,11 @@ class VehicleSegmentationAugmentedDataset(VehicleDatasetBase):
             self.bg_image_paths = list(map(lambda x: x[1], filter(lambda x: x[0] not in self.ignored_frames, enumerate(self.bg_image_paths))))
             self.labels_paths = list(map(lambda x: x[1], filter(lambda x: x[0] not in self.ignored_frames, enumerate(self.labels_paths))))
         
-        self.transform = None   
-        # For the masks, we need to use nearest neighbor interpolation to avoid label mixing.
-        self.mask_transform = transforms.Compose([
-            transforms.Resize((512, 512), interpolation=Image.NEAREST),
-            transforms.ToTensor(),
-        ])
         self.num_items = num_items
         self.sequence_range = [16, 16]        
 
-        labels_boxes = pd.read_csv("data/groundtruth.txt", header=None)
-        self.boxes = [(row[3], row[2], row[7], row[6]) for idx, row in labels_boxes.iterrows()]
+        self.labels_df = pd.read_csv(f"{data_dir}/groundtruth.txt", header=None)
+        self.boxes = [(row[3], row[2], row[7], row[6]) for idx, row in self.labels_df.iterrows()]
     
     def __len__(self):
         return self.num_items
@@ -220,20 +208,10 @@ class VehicleSegmentationAugmentedDataset(VehicleDatasetBase):
         
         return {"pixel_values": pixels, "labels": mask, "boxes": bboxes_trans }
 
-    
-
-    
-
 class VehicleSegmentationAugmentedEvaluationDataset(VehicleSegmentationAugmentedDataset):
 
-    def __init__(self, validation_dir, data_dir, feature_extractor, num_vehicles=1):
-        """
-        Args:
-            data_dir (str): Path to the folder containing input images.            
-            transform (callable, optional): Transformation to apply to the input images.
-            mask_transform (callable, optional): Transformation to apply to the masks.
-        """
-        super().__init__(data_dir, feature_extractor, ignore=False)
+    def __init__(self, validation_dir, augmentation_data_dir, feature_extractor, num_vehicles=1):
+        super().__init__(validation_dir, augmentation_data_dir, feature_extractor, ignore=False)
         self.bg_image_paths = sorted(glob.glob(os.path.join(validation_dir, "*.jpg")))        
         self.num_vehicles = num_vehicles        
         self.vehicle_data = [{
@@ -248,8 +226,7 @@ class VehicleSegmentationAugmentedEvaluationDataset(VehicleSegmentationAugmented
                 direction_range=[45, 120]                              
             ),
             "fg_trans": get_fixed_fg_params()
-        } for i in range(1, num_vehicles)] 
-        self.labels_df = pd.read_csv("data/groundtruth.txt", header=None)
+        } for i in range(1, num_vehicles)]         
     
 
     def __len__(self):
@@ -260,14 +237,10 @@ class VehicleSegmentationAugmentedEvaluationDataset(VehicleSegmentationAugmented
         max_bg = len(self.bg_image_paths)
 
         images, image_labels = get_image_sequences(idx, self.bg_image_paths, self.labels_paths)
-        label_bboxes = [[(row[3], row[2], row[7], row[6]) for idx, row in self.labels_df[max(0, idx-1):min(max_bg, idx+2)].iterrows() ]]
-
-        # pad the sequence when we are at the ends
-        if idx == 0:
-            label_bboxes[0].insert(0, label_bboxes[0][0])
-        elif idx == max_bg - 1:
-            label_bboxes[0].append(label_bboxes[0][-1])
-
+                
+        row = self.labels_df.iloc[idx]
+        label_bboxes = [[(row[3], row[2], row[7], row[6])]]
+        
         if self.num_vehicles > 1:
 
             for data in self.vehicle_data:
@@ -289,8 +262,8 @@ class VehicleSegmentationAugmentedEvaluationDataset(VehicleSegmentationAugmented
                 # generate new vehicles into the scene, using the preloaded images with the original vehicle as backgrounds
                 images, image_labels, bboxes = merge_background_and_foreground_sequences(selected_bg, selected_fg_partial, positions_partial, theta, fg_trans_params=fg_trans_params, bg_trans_params=get_fixed_bg_params_none())
 
-                # append the boxes to the list that contains the boxes for each vehicle
-                label_bboxes.append(bboxes)
+                # append the boxes to the list that contains the boxes for each vehicle (current frame only)
+                label_bboxes.append([bboxes[1]])
                 
         all_vehicle_bboxes = np.array(label_bboxes)
 
@@ -299,33 +272,48 @@ class VehicleSegmentationAugmentedEvaluationDataset(VehicleSegmentationAugmented
         return {"pixel_values": pixels, "labels": mask, "boxes": trans_bboxes.reshape(self.num_vehicles, -1, 4) }
 
 
-class VehicleSegmentationUnlabeledEvaluationDataset(VehicleDatasetBase):
+class VehicleSegmentationEvaluationDataset(VehicleDatasetBase):
 
-    def __init__(self, video_file):
+    def __init__(self, file_or_dir):
         """
         Args:
-            data_dir (str): Path to the folder containing input images.            
-            transform (callable, optional): Transformation to apply to the input images.
-            mask_transform (callable, optional): Transformation to apply to the masks.
+            file_or_dir (str): input directory (to load directory with images) or a path to a video file
         """
         super().__init__()
-        self.video_loader = cv2.VideoCapture(video_file, cv2.CAP_FFMPEG)
-        if not self.video_loader.isOpened():
-            raise Exception("could not open video file")
+        
+        self.image_paths = []
+        self.video_loader = None
+        self.labels_df = None
+        if os.path.isdir(file_or_dir):
+            self.image_paths = sorted(glob.glob(f"{file_or_dir}/*.jpg"))
+        else:
+            self.video_loader = cv2.VideoCapture(file_or_dir, cv2.CAP_FFMPEG)
+            if not self.video_loader.isOpened():
+                raise Exception("could not open video file")
+        if os.path.exists(f"{file_or_dir}/groundtruth.txt"):
+            self.labels_df = pd.read_csv(f"{file_or_dir}/groundtruth.txt", header=None)
     
     def __len__(self):
-        return int(self.video_loader.get(cv2.CAP_PROP_FRAME_COUNT))
+        return int(self.video_loader.get(cv2.CAP_PROP_FRAME_COUNT)) if self.video_loader else len(self.image_paths)
 
     def __getitem__(self, idx):
 
-        frame_count = int(self.video_loader.get(cv2.CAP_PROP_FRAME_COUNT))
+        frame_count = self.__len__()
+
+        label_bboxes = None
+        if self.labels_df is not None:
+            row = self.labels_df.iloc[idx]
+            label_bboxes = np.array([[(row[3], row[2], row[7], row[6])]])
 
         # get frames
         frames = []
         for i in range(idx-1, idx+2):
             if i >= 0 and i < frame_count:
-                self.video_loader.set(cv2.CAP_PROP_POS_FRAMES, i)
-                im = self.video_loader.read()[1]
+                if self.video_loader:
+                    self.video_loader.set(cv2.CAP_PROP_POS_FRAMES, i)
+                    im = self.video_loader.read()[1]                    
+                else:
+                    im = cv2.imread(self.image_paths[idx])
                 im = cv2.cvtColor(im, cv2.COLOR_BGR2RGB)
                 frames.append(im)
             else:
@@ -334,9 +322,9 @@ class VehicleSegmentationUnlabeledEvaluationDataset(VehicleDatasetBase):
         frames[0] = frames[1].copy()
         frames[-1] = frames[-2].copy()
 
-        pixels, _, _ = self._prepare_output_data(frames, None, None, shift_labels=False )
+        pixels, _, bboxes_trans = self._prepare_output_data(frames, None, label_bboxes, shift_labels=False )
 
-        return {"pixel_values": pixels }
+        return {"pixel_values": pixels, "boxes": bboxes_trans.reshape(1, -1, 4) }
 
 
 # Paths to your data directories
@@ -347,14 +335,15 @@ model_name = "nvidia/segformer-b0-finetuned-cityscapes-512-1024"
 feature_extractor = SegformerFeatureExtractor.from_pretrained(model_name)
 
 # Create datasets
-train_dataset = VehicleSegmentationDataset(
-    data_dir=validation_images_dir,
-    labels_dir=labels_dir,    
-    feature_extractor=feature_extractor 
-)
+#train_dataset = VehicleSegmentationDataset(
+#    data_dir=validation_images_dir,
+#    labels_dir=labels_dir,    
+#    feature_extractor=feature_extractor 
+#)
 
 train_dataset = VehicleSegmentationAugmentedDataset(
-    data_dir=labels_dir,
+    data_dir=validation_images_dir,
+    labels_dir=labels_dir,
     feature_extractor=feature_extractor,
     num_items=250
 )
@@ -367,7 +356,7 @@ val_dataset = VehicleSegmentationDataset(
 
 eval_dataset = VehicleSegmentationAugmentedEvaluationDataset(
     validation_dir=validation_images_dir,
-    data_dir=labels_dir,
+    augmentation_data_dir=labels_dir,
     feature_extractor=feature_extractor,
     num_vehicles=1
 )
